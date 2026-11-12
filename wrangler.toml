@@ -10,7 +10,7 @@ compatibility_date = "2025-06-01"
 # Tạo:  npx wrangler kv namespace create KV   → dán id vào đây, bỏ dấu #
 # [[kv_namespaces]]
 # binding = "KV"
-# id = "DAN_ID_KV_VAO_DAY"
+# id = "2f2d50d984344c8abe727f4ca25a05a0"
 
 # ── Biến cấu hình ──────────────────────────────────────────
 [vars]
