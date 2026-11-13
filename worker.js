@@ -362,30 +362,39 @@ function videoUrls(v, quality) {
 /* ───────────────────────── TikTok ───────────────────────── */
 const ttAbs = (u) => (!u ? "" : /^https?:\/\//i.test(u) ? u : `https://www.tikwm.com${u.startsWith("/") ? "" : "/"}${u}`);
 
-async function ttFetch(url) {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const r = await fetch(TT_API, {
-        method: "POST",
-        headers: {
-          "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
-          "User-Agent": UA,
-          Cookie: "current_language=en",
-        },
-        body: `url=${encodeURIComponent(url)}&hd=1`,
-      });
-      const j = await r.json().catch(() => null);
-      if (j && j.code === 0 && j.data) return j.data;
-      // tikwm giới hạn ~1 request/giây
-      if (j && /limit/i.test(String(j.msg || ""))) {
-        await sleep(1300);
-        continue;
+const TT_HOSTS = ["https://www.tikwm.com/api/", "https://tikwm.com/api/"];
+
+async function ttFetch(url, dbg = []) {
+  for (const host of TT_HOSTS) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const r = await fetch(host, {
+          method: "POST",
+          headers: {
+            "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "User-Agent": UA,
+            Accept: "application/json, text/javascript, */*; q=0.01",
+            Origin: "https://www.tikwm.com",
+            Referer: "https://www.tikwm.com/",
+            "X-Requested-With": "XMLHttpRequest",
+            Cookie: "current_language=en",
+          },
+          body: `url=${encodeURIComponent(url)}&hd=1`,
+        });
+        const txt = await r.text();
+        let j = null;
+        try { j = JSON.parse(txt); } catch {}
+        if (j && j.code === 0 && j.data) return j.data;
+        dbg.push(`${new URL(host).hostname} HTTP ${r.status} ${(j && j.msg) || txt.slice(0, 80)}`);
+        if (j && /limit/i.test(String(j.msg || ""))) { await sleep(1300); continue; }
+        break; // lỗi khác → đổi host
+      } catch (e) {
+        dbg.push(`${new URL(host).hostname} ${String(e).slice(0, 60)}`);
+        break;
       }
-      return null;
-    } catch {
-      return null;
     }
   }
+  console.error("tikwm fail:", url, dbg.join(" | "));
   return null;
 }
 
@@ -413,13 +422,13 @@ function normTikTok(d) {
   return { t, m };
 }
 
-async function getTikTok(id, url) {
+async function getTikTok(id, url, dbg) {
   const cache = caches.default;
   if (id) {
     const hit = await cache.match(new Request(`https://cache.local/tt/${id}`));
     if (hit) return hit.json();
   }
-  const d = await ttFetch(url || `https://www.tiktok.com/@tiktok/video/${id}`);
+  const d = await ttFetch(url || `https://www.tiktok.com/@tiktok/video/${id}`, dbg);
   if (!d) return null;
   const post = normTikTok(d);
   await cache.put(
@@ -431,7 +440,7 @@ async function getTikTok(id, url) {
 
 /* ───────────────────────── Xử lý 1 link ───────────────────────── */
 async function loadItem(it) {
-  if (it.k === "tt") return getTikTok(it.id, it.url);
+  if (it.k === "tt") return getTikTok(it.id, it.url, it.dbg);
   const t = await getTweet(it.id);
   if (!t) return null;
   const m = getMedia(t);
@@ -440,8 +449,12 @@ async function loadItem(it) {
 }
 
 async function handleItem(c, it) {
+  it.dbg = [];
   const p = await loadItem(it);
-  if (!p) return send(c, L.notFound);
+  if (!p) {
+    const why = it.k === "tt" && it.dbg.length ? `\n\n<code>${esc(it.dbg.join(" | ").slice(0, 300))}</code>` : "";
+    return send(c, L.notFound + why);
+  }
   const { t, m } = p;
   if (!m.photos.length && !m.videos.length) return send(c, L.noMedia);
 
