@@ -485,7 +485,14 @@ function normTikTok({ item, jar, ua }) {
   const a = item.author || {};
   const uid = a.uniqueId || "";
   // File media TikTok cần cookie + Referer → Worker tự tải rồi upload lên Telegram
-  const headers = { Cookie: jarStr(jar), Referer: "https://www.tiktok.com/", "User-Agent": ua };
+  const headers = {
+    "User-Agent": ua,
+    Referer: "https://www.tiktok.com/",
+    Accept: "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    Range: "bytes=0-",
+    ...(Object.keys(jar).length ? { Cookie: jarStr(jar) } : {}),
+  };
 
   const imgs = ((item.imagePost && item.imagePost.images) || [])
     .map((i) => i && i.imageURL && i.imageURL.urlList && i.imageURL.urlList[0])
@@ -632,14 +639,33 @@ async function sendVideo(c, t, v, showCap) {
   const dims = { width: v.width, height: v.height, duration: v.duration ? Math.round(v.duration) : undefined };
 
   let res = { ok: false };
-  for (let i = 0; i < urls.length; i++) {
+  const why = [];
+  for (let i = 0; i < urls.length && !res.ok; i++) {
     const f = i === 0 ? { ...fields, ...dims } : fields;
     // 1) Telegram tự tải từ link (tối đa 20MB)  2) Worker tải về rồi upload (tối đa 50MB)
-    if (!v.headers) res = await tg(c.env, method, { ...f, [field]: urls[i] });
-    if (!res.ok) res = await tgUpload(c.env, method, field, urls[i], f, "video.mp4", "video/mp4", v.headers);
-    if (res.ok) break;
+    if (!v.headers) {
+      res = await tg(c.env, method, { ...f, [field]: urls[i] });
+      if (!res.ok) why.push(`link: ${res.description}`);
+    }
+    if (!res.ok) {
+      res = await tgUpload(c.env, method, field, urls[i], f, "video.mp4", "video/mp4", v.headers);
+      if (!res.ok) why.push(`upload: ${res.description}`);
+    }
+    // Tải được file nhưng Telegram từ chối (vd. caption/link giấu quá dài) → thử lại không kèm link giấu
+    if (!res.ok && !/^download|too big/i.test(String(res.description || ""))) {
+      res = await tgUpload(c.env, method, field, urls[i], { ...f, caption: undefined, parse_mode: undefined }, "video.mp4", "video/mp4", v.headers);
+      if (!res.ok) why.push(`upload (no caption): ${res.description}`);
+    }
+    // Cuối cùng thử cho Telegram tự tải (nếu CDN không đòi cookie)
+    if (!res.ok && v.headers) {
+      res = await tg(c.env, method, { ...f, [field]: urls[i] });
+      if (!res.ok) why.push(`link: ${res.description}`);
+    }
   }
-  if (!res.ok) await send(c, `${L.sendFail}\n${urls[0]}`);
+  if (!res.ok) {
+    console.error("sendVideo fail:", why.join(" | "));
+    await send(c, `${L.sendFail}\n${urls[0]}\n\n<code>${esc(why.join(" | ").slice(0, 400))}</code>`);
+  }
 }
 
 /* ───────────────────────── Setup webhook ───────────────────────── */
