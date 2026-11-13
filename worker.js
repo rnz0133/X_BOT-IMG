@@ -278,6 +278,11 @@ async function resolveRedirect(u) {
   }
 }
 
+// Telegram/caption thường làm URL dính dấu chấm hoặc dấu ngoặc ở cuối câu.
+function cleanUrl(u) {
+  return String(u || "").replace(/[),.;!?]+$/g, "");
+}
+
 // Link TikTok rút gọn (vm./vt./tiktok.com/t/…) → theo redirect để lấy ID video
 async function resolveTikTok(u) {
   const orig = u;
@@ -291,7 +296,7 @@ async function resolveTikTok(u) {
 }
 
 async function extractItems(text, max) {
-  const links = [...new Set(text.match(ANY_RE) || [])];
+  const links = [...new Set((text.match(ANY_RE) || []).map(cleanUrl))];
   const out = [];
   for (const l of links) {
     let u = l;
@@ -468,16 +473,29 @@ async function ttPage(url, dbg) {
           break;
         }
         const html = await r.text();
-        const m = /<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\s\S]*?)<\/script>/.exec(html);
-        if (!m) {
+        const scripts = [
+          /<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\s\S]*?)<\/script>/,
+          /<script id="SIGI_STATE"[^>]*>([\s\S]*?)<\/script>/,
+          /<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/,
+        ];
+        let data = null;
+        for (const re of scripts) {
+          const m = re.exec(html);
+          if (!m) continue;
+          try {
+            data = JSON.parse(m[1].replace(/&quot;/g, '"'));
+            break;
+          } catch {}
+        }
+        if (!data) {
           dbg.push("không có dữ liệu (TikTok chặn IP / captcha?)");
           break;
         }
-        const data = JSON.parse(m[1]);
-        const d = data && data.__DEFAULT_SCOPE__ && data.__DEFAULT_SCOPE__["webapp.video-detail"];
-        const item = d && d.itemInfo && d.itemInfo.itemStruct;
+        const d = data.__DEFAULT_SCOPE__?.["webapp.video-detail"] || data.ItemModule || data;
+        const item = d?.itemInfo?.itemStruct || d?.itemStruct || d?.itemInfo ||
+          (data.ItemModule && Object.values(data.ItemModule)[0]);
         if (item) return { item, jar, ua };
-        dbg.push(`statusCode ${d && d.statusCode} ${(d && d.statusMsg) || ""}`.trim());
+        dbg.push(`statusCode ${d?.statusCode || "unknown"} ${d?.statusMsg || ""}`.trim());
         break;
       }
     } catch (e) {
@@ -496,7 +514,6 @@ function normTikTok({ item, jar, ua }) {
     Referer: "https://www.tiktok.com/",
     Accept: "*/*",
     "Accept-Language": "en-US,en;q=0.9",
-    Range: "bytes=0-",
     ...(Object.keys(jar).length ? { Cookie: jarStr(jar) } : {}),
   };
 
