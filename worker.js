@@ -525,40 +525,22 @@ async function sendLinks(c, urls) {
 async function sendPhotos(c, t, photos) {
   const asDoc = c.cf.photoAs === "document";
   const type = asDoc ? "document" : "photo";
-  for (let i = 0; i < photos.length; i += 10) {
-    const chunk = photos.slice(i, i + 10);
-    // Mỗi ảnh mang link gốc của chính nó (giấu trong caption); chỉ ảnh đầu tiên hiện tên tác giả
-    const capOf = (p, k) => capFor(c, t, p.url, i === 0 && k === 0);
-    let res;
-    if (chunk.some((p) => p.headers)) {
-      // TikTok: CDN cần cookie → Worker tải từng ảnh rồi upload
-      res = { ok: true };
-      for (let k = 0; k < chunk.length; k++) {
-        const p = chunk[k];
-        const r1 = await tgUpload(
-          c.env, asDoc ? "sendDocument" : "sendPhoto", type, p.url,
-          { ...base(c), caption: capOf(p, k), parse_mode: "HTML" },
-          "photo.jpg", "image/jpeg", p.headers
-        );
-        if (!r1.ok) res = r1;
-      }
-    } else if (chunk.length === 1) {
-      res = await tg(c.env, asDoc ? "sendDocument" : "sendPhoto", {
-        ...base(c),
-        [type]: chunk[0].url,
-        caption: capOf(chunk[0], 0),
-        parse_mode: "HTML",
-      });
-    } else {
-      res = await tg(c.env, "sendMediaGroup", {
-        ...base(c),
-        media: chunk.map((p, k) => ({ type, media: p.url, caption: capOf(p, k), parse_mode: "HTML" })),
-      });
-    }
-    if (!res.ok) {
-      await send(c, L.sendFail);
-      await sendLinks(c, chunk.map((p) => p.url));
-    }
+  const method = asDoc ? "sendDocument" : "sendPhoto";
+  // Gửi TỪNG ẢNH RIÊNG (không gộp album): Telegram chỉ giữ caption của 1 ảnh trong album,
+  // nên reply vào ảnh thứ 2, 3… sẽ không có link giấu. Gửi riêng thì ảnh nào cũng có link của chính nó.
+  const failed = [];
+  for (let k = 0; k < photos.length; k++) {
+    const p = photos[k];
+    const fields = { ...base(c), caption: capFor(c, t, p.url, k === 0), parse_mode: "HTML" };
+    let res = { ok: false };
+    if (!p.headers) res = await tg(c.env, method, { ...fields, [type]: p.url });
+    if (!res.ok) res = await tgUpload(c.env, method, type, p.url, fields, "photo.jpg", "image/jpeg", p.headers);
+    if (!res.ok) failed.push(p.url);
+    if (k < photos.length - 1) await new Promise((r) => setTimeout(r, 350)); // tránh giới hạn tốc độ của Telegram
+  }
+  if (failed.length) {
+    await send(c, L.sendFail);
+    await sendLinks(c, failed);
   }
 }
 
