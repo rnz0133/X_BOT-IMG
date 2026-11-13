@@ -722,7 +722,8 @@ function igMediaFromHtml(html) {
 }
 
 async function igFromPage(url, dbg) {
-  const pages = [url, `${url.replace(/\/?$/, "")}/embed/`];
+  const canonical = url.split("?")[0].replace(/\/?$/, "");
+  const pages = [url, canonical, `${canonical}/embed/`, `${canonical}/?__a=1&__d=dis`];
   for (const page of pages) {
     try {
       const r = await fetch(page, {
@@ -737,9 +738,10 @@ async function igFromPage(url, dbg) {
       const media = igMediaFromHtml(await r.text());
       if (media.images.length || media.videos.length) {
         const t = { platform: "ig", id: "", url, author: { name: "Instagram", screen_name: "" } };
+        const headers = { "User-Agent": UA, Referer: "https://www.instagram.com/" };
         const m = {
-          photos: media.images.map((u) => ({ url: u })),
-          videos: media.videos.map((u) => ({ type: "video", url: u, variants: [{ url: u, content_type: "video/mp4" }] })),
+          photos: media.images.map((u) => ({ url: u, headers })),
+          videos: media.videos.map((u) => ({ type: "video", url: u, headers, variants: [{ url: u, content_type: "video/mp4" }] })),
         };
         return { t, m };
       }
