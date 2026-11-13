@@ -26,14 +26,13 @@ const ZW = "\u200b"; // ký tự vô hình để giấu link trong caption
 
 /* ───────────────────────── Nội dung (tiếng Việt) ───────────────────────── */
 const L = {
-  start:
-    "👋 Gửi link <b>X</b> hoặc <b>TikTok</b>, mình gửi ảnh/video về ngay.\n\n💡 Muốn lấy <b>link gốc</b>: reply vào ảnh/video bot vừa gửi.\n\n❓ /help để xem hướng dẫn chi tiết",
+  start: "👋:3 Xin chào! Bot đã sẵn sàng.\n-----\n❓ /help — Hướng dẫn sử dụng.",
   help:
     "📖 <b>Hướng dẫn sử dụng</b>\n\n" +
     "<b>1️⃣ Tải ảnh / video</b>\n" +
     "Dán link X/Twitter hoặc TikTok vào chat (dán nhiều link một lúc cũng được). Bot gửi ngay ảnh và video, không cần bấm gì.\n\n" +
     "<b>2️⃣ Lấy link ảnh / video gốc</b>\n" +
-    "Reply (trả lời) vào ảnh hoặc video bot vừa gửi bằng một tin nhắn bất kỳ, ví dụ <code>link</code>. Bot sẽ gửi link chất lượng gốc. Bài nhiều ảnh được gửi gộp thành album: reply vào album đó, bot gửi danh sách link đánh số 1, 2, 3… theo thứ tự ảnh.\n\n" +
+    "Tính năng này hiện chỉ hỗ trợ media từ X. Reply vào ảnh hoặc video X bot vừa gửi để nhận link gốc.\n\n" +
     "<b>3️⃣ Lưu ý</b>\n" +
     "• Video X: bot tự chọn bản nét nhất có thể (nếu người đăng chỉ up 720p thì chỉ có 720p).\n" +
     "• TikTok: video không logo (HD nếu có); bài slideshow được gửi dạng ảnh.\n" +
@@ -43,8 +42,8 @@ const L = {
   notFound: "⚠️ Không tải được nội dung này.",
   noMedia: "ℹ️ Bài viết này không có ảnh hay video.",
   sendFail: "⚠️ Không gửi được file này.",
+  linkUnsupported: "🤧 Tính năng lấy link gốc hiện chỉ hỗ trợ X.",
   denied: "⛔ Bạn không có quyền dùng bot này.",
-  starting: "🔄 Đang khởi động…",
   processing: "Đang xử lý\n▰▱▱▱▱▱▱▱▱▱ 0%",
 };
 
@@ -237,11 +236,19 @@ async function replyMediaUrls(env, msg) {
   return [];
 }
 
-// 1 link → gửi nguyên link; nhiều link → danh sách đánh số gọn gàng
+function isXMediaUrl(u) {
+  try {
+    const h = new URL(u).hostname.toLowerCase();
+    return h === "pbs.twimg.com" || h === "video.twimg.com" || h.endsWith(".twimg.com");
+  } catch {
+    return false;
+  }
+}
+
+// Hiển thị URL trực tiếp, dạng: 1 👉 https://...
 function formatLinks(urls) {
-  if (urls.length === 1) return urls[0];
   return urls
-    .map((u, i) => `<b>${i + 1}:</b> <a href="${esc(u).replace(/"/g, "%22")}">${/\.mp4|video/i.test(u) ? "Video" : "Ảnh"} ${i + 1}</a>`)
+    .map((u, i) => `<b>${i + 1}</b> 👉 <a href="${esc(u).replace(/"/g, "%22")}">${esc(u)}</a>`)
     .join("\n");
 }
 
@@ -290,16 +297,15 @@ async function onMessage(env, msg) {
   if (!items.length) {
     // Không có link → có thể là reply vào ảnh/video của bot để xin link gốc
     const urls = await replyMediaUrls(env, msg);
-    if (urls.length) return send(c, formatLinks(urls));
+    if (urls.length) {
+      if (!urls.every(isXMediaUrl)) return sendTemporary(c, L.linkUnsupported);
+      return sendTemporary(c, formatLinks(urls));
+    }
     if (isPrivate) await send(c, L.notLink);
     return;
   }
 
   await tg(env, "sendChatAction", { ...base(c), action: "upload_photo" });
-  // Cho người dùng biết Worker/API đang thức dậy, tránh nhầm là bot đã bắt đầu xử lý.
-  const boot = await send(c, L.starting);
-  await wait(700);
-  if (boot && boot.ok) await tg(env, "deleteMessage", { chat_id: c.chatId, message_id: boot.result.message_id });
   const st = await send(c, L.processing);
   const stopLoading = startLoading(c, st);
   const results = [];
