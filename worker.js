@@ -752,6 +752,39 @@ async function igFromPage(url, dbg) {
   return null;
 }
 
+// Dự phòng khi Instagram trả trang đăng nhập/challenge cho IP của Cloudflare.
+// Jina chỉ đọc nội dung công khai, không truy cập bài riêng tư.
+async function igFromJina(url, dbg) {
+  try {
+    const r = await fetch(`https://r.jina.ai/http://${url.replace(/^https?:\/\//i, "")}`, {
+      headers: { "User-Agent": UA, Accept: "text/plain" },
+    });
+    if (!r.ok) { dbg.push(`Jina HTTP ${r.status}`); return null; }
+    const text = await r.text();
+    const images = [];
+    const videos = [];
+    for (const m of text.matchAll(/!\[[^\]]*\]\((https?:\/\/[^)]+)\)/g)) {
+      const u = igDecodeUrl(m[1]);
+      if (/\.mp4(?:\?|$)/i.test(u)) videos.push(u);
+      else if (/scontent.*\/v\/t51\.[^/]+-15\//i.test(u) && !/s150x150/i.test(u)) images.push(u);
+    }
+    const uniq = (a) => [...new Set(a)];
+    const imgs = uniq(images), vids = uniq(videos);
+    if (!imgs.length && !vids.length) return null;
+    const headers = { "User-Agent": UA, Referer: "https://www.instagram.com/" };
+    return {
+      t: { platform: "ig", id: "", url, author: { name: "Instagram", screen_name: "" } },
+      m: {
+        photos: imgs.map((u) => ({ url: u, headers })),
+        videos: vids.map((u) => ({ type: "video", url: u, headers, variants: [{ url: u, content_type: "video/mp4" }] })),
+      },
+    };
+  } catch (e) {
+    dbg.push(`Jina ${String(e).slice(0, 40)}`);
+    return null;
+  }
+}
+
 const TT_SOURCES = [
   ["trang TikTok", ttFromPage],
   ["tikwm", ttFromTikwm],
@@ -790,7 +823,7 @@ async function handleTikTok(c, it) {
 
 async function handleInstagram(c, it) {
   const dbg = [];
-  const p = await igFromPage(it.url, dbg);
+  const p = (await igFromPage(it.url, dbg)) || (await igFromJina(it.url, dbg));
   if (!p || (!p.m.photos.length && !p.m.videos.length)) {
     console.error("instagram fail:", it.url, dbg.join(" | "));
     await send(c, L.notFound);
