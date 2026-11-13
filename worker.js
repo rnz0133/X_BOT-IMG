@@ -288,7 +288,12 @@ async function resolveTikTok(u) {
   const orig = u;
   for (let i = 0; i < 4; i++) {
     const m = u.match(TT_ID_RE);
-    if (m) return { id: m[1], url: u };
+    if (m) {
+      // TikTok hiện thường không nhúng webapp.video-detail ở URL /photo/.
+      // Cùng item đó nhưng mở qua /video/ thì vẫn trả đầy đủ imagePost.
+      const page = u.replace(/\/photo\/(\d+)/i, "/video/$1");
+      return { id: m[1], url: page };
+    }
     u = await resolveRedirect(u);
     if (!u) break;
   }
