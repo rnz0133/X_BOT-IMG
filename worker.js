@@ -232,6 +232,8 @@ async function replyMediaUrls(env, msg) {
     .filter((x) => x.type === "text_link" && x.url && !PAGE_RE.test(x.url))
     .map((x) => x.url);
   if (own.length) return own;
+  const byMessage = await getLinks(env, `${msg.chat.id}:msg:${r.message_id}`);
+  if (byMessage && byMessage.length) return byMessage;
   if (r.media_group_id) return (await getLinks(env, `${msg.chat.id}:${r.media_group_id}`)) || [];
   return [];
 }
@@ -818,6 +820,9 @@ async function sendPhotos(c, t, photos, sink) {
       const gid = res.ok && res.result && res.result[0] && res.result[0].media_group_id;
       if (gid) await putLinks(c.env, `${c.chatId}:${gid}`, urls);
     }
+    if (res.ok && chunk.length === 1 && res.result && res.result.message_id) {
+      await putLinks(c.env, `${c.chatId}:msg:${res.result.message_id}`, urls);
+    }
     if (!res.ok) failed.push(...urls);
   }
   if (failed.length) {
@@ -869,6 +874,9 @@ async function sendVideo(c, t, v, showCap, sink) {
       res = await tg(c.env, method, { ...f, [field]: urls[i] });
       if (!res.ok) why.push(`link: ${res.description}`);
     }
+  }
+  if (res.ok && res.result && res.result.message_id) {
+    await putLinks(c.env, `${c.chatId}:msg:${res.result.message_id}`, [urls[0]]);
   }
   if (!res.ok) {
     console.error("sendVideo fail:", why.join(" | "));
