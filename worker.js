@@ -33,7 +33,7 @@ const L = {
     "<b>1️⃣ Tải ảnh / video</b>\n" +
     "Dán link bài viết X/Twitter hoặc video TikTok vào chat (dán nhiều link một lúc cũng được). Bot gửi ngay ảnh và video, không cần bấm gì.\n\n" +
     "<b>2️⃣ Lấy link ảnh / video gốc</b>\n" +
-    "Reply (trả lời) vào ảnh hoặc video bot vừa gửi bằng một tin nhắn bất kỳ, ví dụ <code>link</code>. Bot sẽ gửi link chất lượng gốc của đúng ảnh/video đó. Bài có nhiều ảnh thì reply vào ảnh nào nhận link ảnh đó.\n\n" +
+    "Reply (trả lời) vào ảnh hoặc video bot vừa gửi bằng một tin nhắn bất kỳ, ví dụ <code>link</code>. Bot sẽ gửi link chất lượng gốc. Bài nhiều ảnh được gửi gộp thành album: reply vào album đó, bot gửi danh sách link đánh số 1, 2, 3… theo thứ tự ảnh.\n\n" +
     "<b>3️⃣ Lưu ý</b>\n" +
     "• Video X: bot tự chọn bản nét nhất có thể (nếu người đăng chỉ up 720p thì chỉ có 720p).\n" +
     "• TikTok: video không logo (HD nếu có); bài slideshow được gửi dạng ảnh.\n" +
@@ -44,6 +44,7 @@ const L = {
   noMedia: "ℹ️ Bài viết này không có ảnh hay video.",
   sendFail: "⚠️ Telegram không nhận được file (có thể quá nặng, giới hạn 50MB). Đây là link:",
   denied: "⛔ Bạn không có quyền dùng bot này.",
+  processing: "⏳ Đang xử lý…",
 };
 
 /* ───────────────────────── Entry ───────────────────────── */
@@ -119,6 +120,29 @@ async function tgUpload(env, method, field, url, fields, filename, mime, headers
   }
 }
 
+// Gửi album bằng cách tải ảnh về Worker rồi upload (dùng khi CDN cần cookie, hoặc Telegram không tự tải được)
+async function tgUploadGroup(env, chunk, type, fields, caption) {
+  try {
+    const bufs = await Promise.all(
+      chunk.map(async (p) => {
+        const r = await fetch(p.url, { headers: p.headers || { "User-Agent": UA } });
+        if (!r.ok) throw new Error(`download HTTP ${r.status}`);
+        return r.arrayBuffer();
+      })
+    );
+    const fd = new FormData();
+    for (const [k, v] of Object.entries(fields)) if (v !== undefined && v !== null) fd.append(k, String(v));
+    fd.append("media", JSON.stringify(chunk.map((p, k) => ({
+      type, media: `attach://f${k}`, ...(k === 0 ? { caption, parse_mode: "HTML" } : {}),
+    }))));
+    bufs.forEach((b, k) => fd.append(`f${k}`, new Blob([b], { type: "image/jpeg" }), `photo${k}.jpg`));
+    const res = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendMediaGroup`, { method: "POST", body: fd });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, description: String(e) };
+  }
+}
+
 const esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const base = (c) => ({ chat_id: c.chatId, message_thread_id: c.thread });
 
@@ -137,15 +161,45 @@ function send(c, text, extra = {}) {
 // Link file gốc được giấu trong caption dưới dạng ký tự vô hình. Khi bạn reply vào ảnh/video đó,
 // bot đọc lại link này từ tin nhắn được reply — nên không cần database.
 const hid = (u) => `<a href="${esc(u).replace(/"/g, "%22")}">${ZW}</a>`;
-const capLine = (c, t) => (c.cf.caption ? `${t.platform === "tt" ? "🎵" : "🐦"} <a href="${esc(t.url || "")}">@${esc(t.author?.screen_name || "")}</a>` : "");
-const capFor = (c, t, mediaUrl, visible) => (visible ? capLine(c, t) : "") + hid(mediaUrl);
+const hidAll = (urls) => urls.map(hid).join("");
 
-// Lấy link file gốc từ tin nhắn mà người dùng reply tới (chỉ tin của bot)
-function replyMediaUrl(msg) {
+// Lưu danh sách link của 1 album theo media_group_id (vì Telegram chỉ giữ caption ở ảnh đầu album).
+// Nếu bạn gắn KV namespace tên LINKS thì dùng KV (bền hơn); không thì dùng Cache API.
+async function putLinks(env, key, urls) {
+  const v = JSON.stringify(urls);
+  try {
+    if (env.LINKS) await env.LINKS.put(key, v, { expirationTtl: 60 * 60 * 24 * 30 });
+    else await caches.default.put(new Request(`https://cache.local/lk/${key}`), new Response(v, { headers: { "Cache-Control": "max-age=2592000" } }));
+  } catch {}
+}
+async function getLinks(env, key) {
+  try {
+    if (env.LINKS) return JSON.parse((await env.LINKS.get(key)) || "null");
+    const hit = await caches.default.match(new Request(`https://cache.local/lk/${key}`));
+    return hit ? await hit.json() : null;
+  } catch {
+    return null;
+  }
+}
+
+// Lấy các link file gốc từ tin nhắn mà người dùng reply tới (chỉ tin của bot)
+async function replyMediaUrls(env, msg) {
   const r = msg.reply_to_message;
-  if (!r || !r.from || !r.from.is_bot) return null;
-  const e = (r.caption_entities || r.entities || []).find((x) => x.type === "text_link" && x.url && !PAGE_RE.test(x.url));
-  return e ? e.url : null;
+  if (!r || !r.from || !r.from.is_bot) return [];
+  const own = (r.caption_entities || r.entities || [])
+    .filter((x) => x.type === "text_link" && x.url && !PAGE_RE.test(x.url))
+    .map((x) => x.url);
+  if (own.length) return own;
+  if (r.media_group_id) return (await getLinks(env, `${msg.chat.id}:${r.media_group_id}`)) || [];
+  return [];
+}
+
+// 1 link → gửi nguyên link; nhiều link → danh sách đánh số gọn gàng
+function formatLinks(urls) {
+  if (urls.length === 1) return urls[0];
+  return urls
+    .map((u, i) => `<b>${i + 1}:</b> <a href="${esc(u).replace(/"/g, "%22")}">${/\.mp4|video/i.test(u) ? "Video" : "Ảnh"} ${i + 1}</a>`)
+    .join("\n");
 }
 
 /* ───────────────────────── Router ───────────────────────── */
@@ -192,14 +246,19 @@ async function onMessage(env, msg) {
   const items = await extractItems(text, cf.maxLinks);
   if (!items.length) {
     // Không có link → có thể là reply vào ảnh/video của bot để xin link gốc
-    const u = replyMediaUrl(msg);
-    if (u) return send(c, u);
+    const urls = await replyMediaUrls(env, msg);
+    if (urls.length) return send(c, formatLinks(urls));
     if (isPrivate) await send(c, L.notLink);
     return;
   }
 
   await tg(env, "sendChatAction", { ...base(c), action: "upload_photo" });
-  for (const it of items) await handleItem(c, it);
+  const st = await send(c, L.processing);
+  try {
+    for (const it of items) await handleItem(c, it);
+  } finally {
+    if (st && st.ok) await tg(env, "deleteMessage", { chat_id: c.chatId, message_id: st.result.message_id });
+  }
 }
 
 /* ───────────────────────── Nhận diện link ───────────────────────── */
@@ -526,17 +585,30 @@ async function sendPhotos(c, t, photos) {
   const asDoc = c.cf.photoAs === "document";
   const type = asDoc ? "document" : "photo";
   const method = asDoc ? "sendDocument" : "sendPhoto";
-  // Gửi TỪNG ẢNH RIÊNG (không gộp album): Telegram chỉ giữ caption của 1 ảnh trong album,
-  // nên reply vào ảnh thứ 2, 3… sẽ không có link giấu. Gửi riêng thì ảnh nào cũng có link của chính nó.
   const failed = [];
-  for (let k = 0; k < photos.length; k++) {
-    const p = photos[k];
-    const fields = { ...base(c), caption: capFor(c, t, p.url, k === 0), parse_mode: "HTML" };
+  for (let i = 0; i < photos.length; i += 10) {
+    const chunk = photos.slice(i, i + 10);
+    const urls = chunk.map((p) => p.url);
+    // Caption chỉ có các link giấu (không hiện chữ): ảnh đầu album giữ link của cả album
+    const caption = hidAll(urls);
     let res = { ok: false };
-    if (!p.headers) res = await tg(c.env, method, { ...fields, [type]: p.url });
-    if (!res.ok) res = await tgUpload(c.env, method, type, p.url, fields, "photo.jpg", "image/jpeg", p.headers);
-    if (!res.ok) failed.push(p.url);
-    if (k < photos.length - 1) await new Promise((r) => setTimeout(r, 350)); // tránh giới hạn tốc độ của Telegram
+    if (chunk.length === 1) {
+      const fields = { ...base(c), caption, parse_mode: "HTML" };
+      if (!chunk[0].headers) res = await tg(c.env, method, { ...fields, [type]: urls[0] });
+      if (!res.ok) res = await tgUpload(c.env, method, type, urls[0], fields, "photo.jpg", "image/jpeg", chunk[0].headers);
+    } else {
+      if (!chunk.some((p) => p.headers)) {
+        res = await tg(c.env, "sendMediaGroup", {
+          ...base(c),
+          media: chunk.map((p, k) => ({ type, media: p.url, ...(k === 0 ? { caption, parse_mode: "HTML" } : {}) })),
+        });
+      }
+      if (!res.ok) res = await tgUploadGroup(c.env, chunk, type, base(c), caption);
+      // Lưu danh sách link theo media_group_id để reply vào BẤT KỲ ảnh nào trong album cũng lấy được đủ link
+      const gid = res.ok && res.result && res.result[0] && res.result[0].media_group_id;
+      if (gid) await putLinks(c.env, `${c.chatId}:${gid}`, urls);
+    }
+    if (!res.ok) failed.push(...urls);
   }
   if (failed.length) {
     await send(c, L.sendFail);
@@ -553,7 +625,7 @@ async function sendVideo(c, t, v, showCap) {
   const fields = {
     ...base(c),
     // Link giấu luôn là bản chất lượng cao nhất theo cài đặt, kể cả khi phải gửi bản thấp hơn
-    caption: capFor(c, t, urls[0], showCap),
+    caption: hid(urls[0]),
     parse_mode: "HTML",
     ...(gif ? {} : { supports_streaming: true }),
   };
