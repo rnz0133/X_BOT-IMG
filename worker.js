@@ -7,11 +7,10 @@
  * • Không cần KV
  *
  * Cấu hình: xem wrangler.toml  |  Secrets: BOT_TOKEN, WEBHOOK_SECRET
- * Nguồn dữ liệu: api.fxtwitter.com + cdn.syndication.twimg.com (X), tikwm.com (TikTok) — không cần API key
+ * Nguồn dữ liệu: api.fxtwitter.com + cdn.syndication.twimg.com (X), trực tiếp từ trang TikTok (không dùng API bên thứ 3)
  */
 
 const FX_API = "https://api.fxtwitter.com";
-const TT_API = "https://www.tikwm.com/api/";
 const LINK_RE =
   /https?:\/\/(?:www\.|mobile\.)?(?:x\.com|twitter\.com|fxtwitter\.com|fixupx\.com|vxtwitter\.com|fixvx\.com|t\.co)\/[^\s<>"']+/gi;
 const TT_RE = /https?:\/\/(?:(?:www|m|vm|vt)\.)?tiktok\.com\/[^\s<>"']+/gi;
@@ -86,7 +85,6 @@ function cfg(env) {
   };
 }
 const isAllowed = (cf, id) => cf.allowed.length === 0 || cf.allowed.includes(String(id));
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /* ───────────────────────── Telegram helpers ───────────────────────── */
 async function tg(env, method, body) {
@@ -103,9 +101,9 @@ async function tg(env, method, body) {
 }
 
 // Tải file về Worker rồi upload thẳng lên Telegram (dùng khi gửi bằng link bị từ chối: file > 20MB, link cần header…)
-async function tgUpload(env, method, field, url, fields, filename, mime) {
+async function tgUpload(env, method, field, url, fields, filename, mime, headers) {
   try {
-    const r = await fetch(url, { headers: { "User-Agent": UA } });
+    const r = await fetch(url, { headers: headers || { "User-Agent": UA } });
     if (!r.ok) return { ok: false, description: `download HTTP ${r.status}` };
     const len = parseInt(r.headers.get("content-length") || "0", 10);
     if (len > TG_UPLOAD_MAX) return { ok: false, description: "file too big" };
@@ -224,7 +222,7 @@ async function resolveTikTok(u) {
     u = await resolveRedirect(u);
     if (!u) break;
   }
-  return { id: null, url: orig }; // tikwm sẽ tự giải link rút gọn
+  return { id: null, url: orig };
 }
 
 async function extractItems(text, max) {
@@ -359,64 +357,110 @@ function videoUrls(v, quality) {
   return list.slice(start).map((x) => x.url);
 }
 
-/* ───────────────────────── TikTok ───────────────────────── */
-const ttAbs = (u) => (!u ? "" : /^https?:\/\//i.test(u) ? u : `https://www.tikwm.com${u.startsWith("/") ? "" : "/"}${u}`);
+/* ───────────────────────── TikTok (tự đọc trực tiếp từ trang TikTok, không qua API bên thứ 3) ───────────────────────── */
+const TT_UAS = [
+  UA,
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+];
 
-const TT_HOSTS = ["https://www.tikwm.com/api/", "https://tikwm.com/api/"];
+// Gom cookie TikTok trả về (file video/ảnh trên CDN thường đòi đúng cookie này)
+function collectCookies(res, jar) {
+  const list =
+    typeof res.headers.getSetCookie === "function"
+      ? res.headers.getSetCookie()
+      : (res.headers.get("set-cookie") || "").split(/,(?=\s*[\w-]+=)/);
+  for (const s of list) {
+    const m = /^\s*([^=;\s]+)=([^;]*)/.exec(s);
+    if (m) jar[m[1]] = m[2];
+  }
+}
+const jarStr = (jar) => Object.entries(jar).map(([k, v]) => `${k}=${v}`).join("; ");
 
-async function ttFetch(url, dbg = []) {
-  for (const host of TT_HOSTS) {
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        const r = await fetch(host, {
-          method: "POST",
+// Mở trang video, tự theo redirect (giữ cookie), đọc JSON nhúng sẵn trong HTML
+async function ttPage(url, dbg) {
+  for (const ua of TT_UAS) {
+    const jar = {};
+    let u = url;
+    try {
+      for (let hop = 0; hop < 6; hop++) {
+        const r = await fetch(u, {
+          redirect: "manual",
           headers: {
-            "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
-            "User-Agent": UA,
-            Accept: "application/json, text/javascript, */*; q=0.01",
-            Origin: "https://www.tikwm.com",
-            Referer: "https://www.tikwm.com/",
-            "X-Requested-With": "XMLHttpRequest",
-            Cookie: "current_language=en",
+            "User-Agent": ua,
+            Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            ...(Object.keys(jar).length ? { Cookie: jarStr(jar) } : {}),
           },
-          body: `url=${encodeURIComponent(url)}&hd=1`,
         });
-        const txt = await r.text();
-        let j = null;
-        try { j = JSON.parse(txt); } catch {}
-        if (j && j.code === 0 && j.data) return j.data;
-        dbg.push(`${new URL(host).hostname} HTTP ${r.status} ${(j && j.msg) || txt.slice(0, 80)}`);
-        if (j && /limit/i.test(String(j.msg || ""))) { await sleep(1300); continue; }
-        break; // lỗi khác → đổi host
-      } catch (e) {
-        dbg.push(`${new URL(host).hostname} ${String(e).slice(0, 60)}`);
+        collectCookies(r, jar);
+        const loc = r.headers.get("location");
+        if (r.status >= 300 && r.status < 400 && loc) {
+          u = new URL(loc, u).toString();
+          continue;
+        }
+        if (!r.ok) {
+          dbg.push(`HTTP ${r.status}`);
+          break;
+        }
+        const html = await r.text();
+        const m = /<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\s\S]*?)<\/script>/.exec(html);
+        if (!m) {
+          dbg.push("không có dữ liệu (TikTok chặn IP / captcha?)");
+          break;
+        }
+        const data = JSON.parse(m[1]);
+        const d = data && data.__DEFAULT_SCOPE__ && data.__DEFAULT_SCOPE__["webapp.video-detail"];
+        const item = d && d.itemInfo && d.itemInfo.itemStruct;
+        if (item) return { item, jar, ua };
+        dbg.push(`statusCode ${d && d.statusCode} ${(d && d.statusMsg) || ""}`.trim());
         break;
       }
+    } catch (e) {
+      dbg.push(String(e).slice(0, 60));
     }
   }
-  console.error("tikwm fail:", url, dbg.join(" | "));
   return null;
 }
 
-function normTikTok(d) {
-  const a = d.author || {};
-  const uid = a.unique_id || "";
-  const imgs = (d.images || []).map(ttAbs).filter(Boolean).slice(0, 20);
-  const hd = ttAbs(d.hdplay), sd = ttAbs(d.play);
+function normTikTok({ item, jar, ua }) {
+  const a = item.author || {};
+  const uid = a.uniqueId || "";
+  // File media TikTok cần cookie + Referer → Worker tự tải rồi upload lên Telegram
+  const headers = { Cookie: jarStr(jar), Referer: "https://www.tiktok.com/", "User-Agent": ua };
+
+  const imgs = ((item.imagePost && item.imagePost.images) || [])
+    .map((i) => i && i.imageURL && i.imageURL.urlList && i.imageURL.urlList[0])
+    .filter(Boolean)
+    .slice(0, 20);
+
+  const v = item.video || {};
   const variants = [];
-  if (hd) variants.push({ url: hd, bitrate: 2e6, content_type: "video/mp4" });
-  if (sd && sd !== hd) variants.push({ url: sd, bitrate: 1e6, content_type: "video/mp4" });
+  for (const b of v.bitrateInfo || []) {
+    if (/265|hevc/i.test(b.CodecType || "")) continue; // H.265 nhiều máy không phát được
+    const u = b.PlayAddr && b.PlayAddr.UrlList && b.PlayAddr.UrlList[0];
+    if (u) variants.push({ url: u, bitrate: b.Bitrate || 0, content_type: "video/mp4" });
+  }
+  if (v.playAddr) variants.push({ url: v.playAddr, bitrate: 1, content_type: "video/mp4" }); // bản không logo mặc định
+
   const t = {
     platform: "tt",
-    id: d.id,
-    url: `https://www.tiktok.com/@${uid}/video/${d.id}`,
+    id: item.id,
+    url: `https://www.tiktok.com/@${uid}/video/${item.id}`,
     author: { name: a.nickname || uid, screen_name: uid },
   };
   const m = {
-    photos: imgs.map((url) => ({ url })),
+    photos: imgs.map((url) => ({ url, headers })),
     videos:
       !imgs.length && variants.length
-        ? [{ type: "video", url: variants[0].url, variants, duration: d.duration || undefined }]
+        ? [{
+            type: "video",
+            url: variants[0].url,
+            variants,
+            headers,
+            width: v.width || undefined,
+            height: v.height || undefined,
+            duration: v.duration || undefined,
+          }]
         : [],
   };
   return { t, m };
@@ -425,15 +469,18 @@ function normTikTok(d) {
 async function getTikTok(id, url, dbg) {
   const cache = caches.default;
   if (id) {
-    const hit = await cache.match(new Request(`https://cache.local/tt/${id}`));
+    const hit = await cache.match(new Request(`https://cache.local/tt2/${id}`));
     if (hit) return hit.json();
   }
-  const d = await ttFetch(url || `https://www.tiktok.com/@tiktok/video/${id}`, dbg);
-  if (!d) return null;
-  const post = normTikTok(d);
+  const page = await ttPage(url || `https://www.tiktok.com/@tiktok/video/${id}`, dbg);
+  if (!page) {
+    console.error("tiktok fail:", url, dbg.join(" | "));
+    return null;
+  }
+  const post = normTikTok(page);
   await cache.put(
-    new Request(`https://cache.local/tt/${post.t.id}`),
-    new Response(JSON.stringify(post), { headers: { "content-type": "application/json", "Cache-Control": "max-age=1800" } })
+    new Request(`https://cache.local/tt2/${post.t.id}`),
+    new Response(JSON.stringify(post), { headers: { "content-type": "application/json", "Cache-Control": "max-age=600" } })
   );
   return post;
 }
@@ -483,7 +530,19 @@ async function sendPhotos(c, t, photos) {
     // Mỗi ảnh mang link gốc của chính nó (giấu trong caption); chỉ ảnh đầu tiên hiện tên tác giả
     const capOf = (p, k) => capFor(c, t, p.url, i === 0 && k === 0);
     let res;
-    if (chunk.length === 1) {
+    if (chunk.some((p) => p.headers)) {
+      // TikTok: CDN cần cookie → Worker tải từng ảnh rồi upload
+      res = { ok: true };
+      for (let k = 0; k < chunk.length; k++) {
+        const p = chunk[k];
+        const r1 = await tgUpload(
+          c.env, asDoc ? "sendDocument" : "sendPhoto", type, p.url,
+          { ...base(c), caption: capOf(p, k), parse_mode: "HTML" },
+          "photo.jpg", "image/jpeg", p.headers
+        );
+        if (!r1.ok) res = r1;
+      }
+    } else if (chunk.length === 1) {
       res = await tg(c.env, asDoc ? "sendDocument" : "sendPhoto", {
         ...base(c),
         [type]: chunk[0].url,
@@ -522,8 +581,8 @@ async function sendVideo(c, t, v, showCap) {
   for (let i = 0; i < urls.length; i++) {
     const f = i === 0 ? { ...fields, ...dims } : fields;
     // 1) Telegram tự tải từ link (tối đa 20MB)  2) Worker tải về rồi upload (tối đa 50MB)
-    res = await tg(c.env, method, { ...f, [field]: urls[i] });
-    if (!res.ok) res = await tgUpload(c.env, method, field, urls[i], f, "video.mp4", "video/mp4");
+    if (!v.headers) res = await tg(c.env, method, { ...f, [field]: urls[i] });
+    if (!res.ok) res = await tgUpload(c.env, method, field, urls[i], f, "video.mp4", "video/mp4", v.headers);
     if (res.ok) break;
   }
   if (!res.ok) await send(c, `${L.sendFail}\n${urls[0]}`);
