@@ -646,7 +646,15 @@ async function imgbbPost(endpoint, fd) {
   let err = "";
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const r = await fetch(endpoint, { method: "POST", body: fd, headers: { Accept: "application/json" } });
+      const r = await fetch(endpoint, {
+        method: "POST",
+        body: fd,
+        headers: {
+          Accept: "application/json",
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        },
+      });
       const j = await r.json().catch(() => null);
       const d = j && (j.data || j.image);
       if (r.ok && d && (d.url || d.display_url)) {
