@@ -44,7 +44,8 @@ const L = {
   noMedia: "ℹ️ Bài viết này không có ảnh hay video.",
   sendFail: "⚠️ Không gửi được file này.",
   denied: "⛔ Bạn không có quyền dùng bot này.",
-  processing: "⏳ Đang xử lý…",
+  starting: "🔄 Đang khởi động…",
+  processing: "Đang xử lý\n▰▱▱▱▱▱▱▱▱▱ 0%",
 };
 
 /* ───────────────────────── Entry ───────────────────────── */
@@ -159,20 +160,26 @@ function send(c, text, extra = {}) {
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+function progressText(step) {
+  const total = 10;
+  const n = Math.max(0, Math.min(total, step));
+  return `Đang xử lý\n${"▰".repeat(n)}${"▱".repeat(total - n)} ${n * 10}%`;
+}
+
 function startLoading(c, st) {
   const state = { done: false };
   const run = (async () => {
     if (!st || !st.ok) return;
-    let dots = 1;
+    let step = 1;
     while (!state.done) {
-      await wait(800);
+      await wait(900);
       if (state.done) break;
       await tg(c.env, "editMessageText", {
         ...base(c),
         message_id: st.result.message_id,
-        text: `⏳ Đang xử lý${".".repeat(dots)}`,
+        text: progressText(step),
       });
-      dots = (dots % 3) + 1;
+      step = step >= 9 ? 1 : step + 1;
     }
   })();
   return async () => {
@@ -277,6 +284,10 @@ async function onMessage(env, msg) {
   }
 
   await tg(env, "sendChatAction", { ...base(c), action: "upload_photo" });
+  // Cho người dùng biết Worker/API đang thức dậy, tránh nhầm là bot đã bắt đầu xử lý.
+  const boot = await send(c, L.starting);
+  await wait(1500);
+  if (boot && boot.ok) await tg(env, "deleteMessage", { chat_id: c.chatId, message_id: boot.result.message_id });
   const st = await send(c, L.processing);
   const stopLoading = startLoading(c, st);
   const results = [];
