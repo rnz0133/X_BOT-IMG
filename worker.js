@@ -242,6 +242,8 @@ function send(c, text, extra = {}) {
 
 /* ───────────────────────── Router ───────────────────────── */
 async function handleUpdate(update, env) {
+  RELAY = (env.IMGBB_RELAY || "").replace(/\/+$/, "");
+  RELAY_KEY = env.WEBHOOK_SECRET || "";
   if (update.message) return onMessage(env, update.message);
   if (update.callback_query) return onCallback(env, update.callback_query);
 }
@@ -623,6 +625,9 @@ const MIME = {
   jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp",
   bmp: "image/bmp", heic: "image/heic", heif: "image/heif", tif: "image/tiff", tiff: "image/tiff", avif: "image/avif",
 };
+// Tuỳ chọn: gửi qua relay nếu imgbb chặn IP của Cloudflare Workers (đặt biến IMGBB_RELAY)
+let RELAY = "";
+let RELAY_KEY = "";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const mask = (k) => (k.length > 8 ? `${k.slice(0, 4)}…${k.slice(-4)}` : "••••");
 const short = (s, n) => (String(s).length > n ? String(s).slice(0, n - 1) + "…" : String(s));
@@ -643,6 +648,11 @@ async function pool(items, n, fn) {
 
 /* ── gọi imgbb ── */
 async function imgbbPost(endpoint, fd) {
+  const extra = {};
+  if (RELAY) {
+    endpoint = endpoint.includes("ibb.co/json") ? `${RELAY}/json` : `${RELAY}/1/upload`;
+    extra["X-Relay-Secret"] = RELAY_KEY;
+  }
   let err = "";
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -650,6 +660,7 @@ async function imgbbPost(endpoint, fd) {
         method: "POST",
         body: fd,
         headers: {
+          ...extra,
           Accept: "application/json",
           "User-Agent":
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
