@@ -278,13 +278,14 @@ async function resolveRedirect(u) {
 
 // Link TikTok rút gọn (vm./vt./tiktok.com/t/…) → theo redirect để lấy ID video
 async function resolveTikTok(u) {
+  const orig = u;
   for (let i = 0; i < 4; i++) {
     const m = u.match(TT_ID_RE);
     if (m) return { id: m[1], url: u };
     u = await resolveRedirect(u);
-    if (!u) return null;
+    if (!u) break;
   }
-  return null;
+  return { id: null, url: orig }; // tikwm sẽ tự giải link rút gọn
 }
 
 async function extractItems(text, max) {
@@ -296,7 +297,7 @@ async function extractItems(text, max) {
     if (!u) continue;
     if (/tiktok\.com/i.test(u)) {
       const r = await resolveTikTok(u);
-      if (r && !out.some((o) => o.k === "tt" && o.id === r.id)) out.push({ k: "tt", ...r });
+      if (r && !out.some((o) => o.k === "tt" && (r.id ? o.id === r.id : o.url === r.url))) out.push({ k: "tt", ...r });
     } else {
       const m = u.match(STATUS_RE);
       if (m && !out.some((o) => o.k === "x" && o.id === m[1])) out.push({ k: "x", id: m[1] });
@@ -484,14 +485,15 @@ function normTikTok(d) {
 
 async function getTikTok(id, url) {
   const cache = caches.default;
-  const key = new Request(`https://cache.local/tt/${id}`);
-  const hit = await cache.match(key);
-  if (hit) return hit.json();
+  if (id) {
+    const hit = await cache.match(new Request(`https://cache.local/tt/${id}`));
+    if (hit) return hit.json();
+  }
   const d = await ttFetch(url || `https://www.tiktok.com/@tiktok/video/${id}`);
   if (!d) return null;
   const post = normTikTok(d);
   await cache.put(
-    key,
+    new Request(`https://cache.local/tt/${post.t.id}`),
     new Response(JSON.stringify(post), { headers: { "content-type": "application/json", "Cache-Control": "max-age=1800" } })
   );
   return post;
@@ -548,9 +550,9 @@ function keyboard(c, pid, m) {
 }
 
 async function handleItem(c, it) {
-  const pid = it.k === "tt" ? `T${it.id}` : it.id;
-  const p = await loadPost(pid, it.url);
+  const p = it.k === "tt" ? await getTikTok(it.id, it.url) : await loadPost(it.id);
   if (!p) return send(c, c.L.notFound);
+  const pid = it.k === "tt" ? `T${p.t.id}` : it.id;
   const { t, m } = p;
   if (!m.photos.length && !m.videos.length) return send(c, c.L.noMedia);
 
