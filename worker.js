@@ -82,7 +82,7 @@ function cfg(env) {
     allowed: list(env.ALLOWED_USERS),
     quality: ["best", "medium", "low"].includes(env.DEFAULT_QUALITY) ? env.DEFAULT_QUALITY : "best",
     photoAs: env.DEFAULT_PHOTO_AS === "document" ? "document" : "photo",
-    caption: env.DEFAULT_CAPTION !== "false",
+    deleteX: env.DELETE_X_LINK !== "false", // xoá tin nhắn chứa link X sau khi gửi xong (đặt "false" để tắt)
   };
 }
 const isAllowed = (cf, id) => cf.allowed.length === 0 || cf.allowed.includes(String(id));
@@ -254,10 +254,16 @@ async function onMessage(env, msg) {
 
   await tg(env, "sendChatAction", { ...base(c), action: "upload_photo" });
   const st = await send(c, L.processing);
+  const results = [];
   try {
-    for (const it of items) await handleItem(c, it);
+    for (const it of items) results.push(await handleItem(c, it));
   } finally {
     if (st && st.ok) await tg(env, "deleteMessage", { chat_id: c.chatId, message_id: st.result.message_id });
+  }
+  // Chỉ xoá tin nhắn của người dùng khi: toàn link X, gửi thành công hết, và tin nhắn không có chữ nào khác
+  const raw = msg.text || msg.caption || "";
+  if (cf.deleteX && items.every((i) => i.k === "x") && results.every(Boolean) && !raw.replace(ANY_RE, "").trim()) {
+    await tg(env, "deleteMessage", { chat_id: c.chatId, message_id: msg.message_id });
   }
 }
 
@@ -532,47 +538,168 @@ function normTikTok({ item, jar, ua }) {
   return { t, m };
 }
 
-async function getTikTok(id, url, dbg) {
-  const cache = caches.default;
-  if (id) {
-    const hit = await cache.match(new Request(`https://cache.local/tt2/${id}`));
-    if (hit) return hit.json();
+/* ── Các API bên thứ 3 (dự phòng, thử lần lượt khi cách tự đọc trang bị chặn / lỗi) ── */
+const mkTT = (id, uid, nick, imgs, vids, meta = {}) => {
+  imgs = (imgs || []).filter(Boolean).slice(0, 20);
+  vids = [...new Set((vids || []).filter(Boolean))];
+  if (!imgs.length && !vids.length) return null;
+  const t = {
+    platform: "tt",
+    id: id || "",
+    url: id && uid ? `https://www.tiktok.com/@${uid}/video/${id}` : "",
+    author: { name: nick || uid || "", screen_name: uid || "" },
+  };
+  return {
+    t,
+    m: {
+      photos: imgs.map((url) => ({ url })),
+      videos: imgs.length
+        ? []
+        : [{
+            type: "video",
+            url: vids[0],
+            variants: vids.map((u, i) => ({ url: u, bitrate: 1e6 - i, content_type: "video/mp4" })),
+            width: meta.width, height: meta.height, duration: meta.duration,
+          }],
+    },
+  };
+};
+
+async function ttJson(name, url, init, dbg) {
+  try {
+    const r = await fetch(url, { ...init, signal: AbortSignal.timeout(15000) });
+    const txt = await r.text();
+    try { return JSON.parse(txt); } catch { dbg.push(`${name} HTTP ${r.status} (không phải JSON)`); }
+  } catch (e) {
+    dbg.push(`${name} ${String(e).slice(0, 50)}`);
   }
-  const page = await ttPage(url || `https://www.tiktok.com/@tiktok/video/${id}`, dbg);
-  if (!page) {
-    console.error("tiktok fail:", url, dbg.join(" | "));
-    return null;
-  }
-  const post = normTikTok(page);
-  await cache.put(
-    new Request(`https://cache.local/tt2/${post.t.id}`),
-    new Response(JSON.stringify(post), { headers: { "content-type": "application/json", "Cache-Control": "max-age=600" } })
-  );
-  return post;
+  return null;
+}
+const imgUrl = (x) => (typeof x === "string" ? x : x && (x.url || x.imageURL?.urlList?.[0] || x.display_image?.url_list?.[0]));
+
+// 0) Tự đọc trang TikTok (không phụ thuộc bên thứ 3)
+async function ttFromPage(url, dbg) {
+  const p = await ttPage(url, dbg);
+  return p ? normTikTok(p) : null;
 }
 
+// 1) tikwm.com
+async function ttFromTikwm(url, dbg) {
+  const abs = (u) => (!u ? "" : /^https?:\/\//i.test(u) ? u : `https://www.tikwm.com${u.startsWith("/") ? "" : "/"}${u}`);
+  for (const host of ["https://www.tikwm.com/api/", "https://tikwm.com/api/"]) {
+    const j = await ttJson("tikwm", host, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "User-Agent": UA,
+        Accept: "application/json, text/javascript, */*; q=0.01",
+        Origin: "https://www.tikwm.com",
+        Referer: "https://www.tikwm.com/",
+        "X-Requested-With": "XMLHttpRequest",
+        Cookie: "current_language=en",
+      },
+      body: `url=${encodeURIComponent(url)}&hd=1`,
+    }, dbg);
+    if (j && j.code === 0 && j.data) {
+      const d = j.data, a = d.author || {};
+      return mkTT(d.id, a.unique_id, a.nickname, (d.images || []).map(abs), [abs(d.hdplay), abs(d.play)], { duration: d.duration });
+    }
+    if (j) dbg.push(`tikwm ${String(j.msg || "").slice(0, 60)}`);
+  }
+  return null;
+}
+
+// 2) tiklydown
+async function ttFromTiklydown(url, dbg) {
+  const j = await ttJson("tiklydown", `https://api.tiklydown.eu.org/api/download/v3?url=${encodeURIComponent(url)}`, { headers: { "User-Agent": UA } }, dbg);
+  const d = j && (j.data || j);
+  if (!d || (!d.video && !d.images)) { if (j) dbg.push("tiklydown không có dữ liệu"); return null; }
+  const v = d.video || {}, a = d.author || {};
+  return mkTT(
+    d.id, a.unique_id || a.uniqueId || a.username, a.nickname || a.name,
+    (Array.isArray(d.images) ? d.images : []).map(imgUrl),
+    [v.noWatermark, v.no_watermark, v.nowm, v.playAddr, v.watermark],
+    { width: v.width, height: v.height, duration: v.duration }
+  );
+}
+
+// 3) douyin.wtf (Douyin_TikTok_Download_API public)
+async function ttFromDouyinWtf(url, dbg) {
+  const j = await ttJson("douyin.wtf", `https://api.douyin.wtf/api/hybrid/video_data?url=${encodeURIComponent(url)}&minimal=true`, { headers: { "User-Agent": UA } }, dbg);
+  const d = j && j.data;
+  if (!d) { if (j) dbg.push(`douyin.wtf ${String(j.message || j.detail || "").slice(0, 60)}`); return null; }
+  const vd = d.video_data || {}, a = d.author || {};
+  const imgs = ((d.image_data && (d.image_data.no_watermark_image_list || d.image_data.watermark_image_list)) || []).map(imgUrl);
+  return mkTT(d.aweme_id || d.id, a.unique_id || a.uniqueId, a.nickname, imgs, [vd.nwm_video_url_HQ, vd.nwm_video_url]);
+}
+
+// 4) lovetik.com
+async function ttFromLovetik(url, dbg) {
+  const j = await ttJson("lovetik", "https://lovetik.com/api/ajax/search", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+      "User-Agent": UA, "X-Requested-With": "XMLHttpRequest",
+      Origin: "https://lovetik.com", Referer: "https://lovetik.com/",
+    },
+    body: `query=${encodeURIComponent(url)}`,
+  }, dbg);
+  if (!j || j.status !== "ok") { if (j) dbg.push(`lovetik ${String(j.mess || j.status || "").slice(0, 60)}`); return null; }
+  const links = (j.links || []).filter((l) => l && l.a && !/mp3|audio/i.test(`${l.t || ""} ${l.s || ""}`));
+  const label = (l) => `${l.t || ""} ${l.s || ""}`;
+  const vids = [
+    ...links.filter((l) => /no.?water|without/i.test(label(l))),
+    ...links.filter((l) => !/no.?water|without/i.test(label(l)) && !/water/i.test(label(l))),
+  ].map((l) => l.a);
+  return mkTT(j.vid, j.author_id || j.author, j.author, (j.images || []).map(imgUrl), vids);
+}
+
+const TT_SOURCES = [
+  ["trang TikTok", ttFromPage],
+  ["tikwm", ttFromTikwm],
+  ["tiklydown", ttFromTiklydown],
+  ["douyin.wtf", ttFromDouyinWtf],
+  ["lovetik", ttFromLovetik],
+];
+
 /* ───────────────────────── Xử lý 1 link ───────────────────────── */
-async function loadItem(it) {
-  if (it.k === "tt") return getTikTok(it.id, it.url, it.dbg);
-  const t = await getTweet(it.id);
-  if (!t) return null;
-  const m = getMedia(t);
-  await enrichVideos(m, it.id);
-  return { t, m };
+async function sendPost(c, t, m, sink) {
+  let ok = true;
+  if (m.photos.length) ok = (await sendPhotos(c, t, m.photos, sink)) && ok;
+  for (let i = 0; i < m.videos.length; i++) ok = (await sendVideo(c, t, m.videos[i], false, sink)) && ok;
+  return ok;
+}
+
+// TikTok: thử lần lượt từng nguồn; nguồn nào lấy được VÀ gửi được thì dừng
+async function handleTikTok(c, it) {
+  const dbg = [];
+  const url = it.url || `https://www.tiktok.com/@tiktok/video/${it.id}`;
+  const sink = [];
+  let found = false;
+  for (const [name, fn] of TT_SOURCES) {
+    let p = null;
+    try { p = await fn(url, dbg); } catch (e) { dbg.push(`${name} ${String(e).slice(0, 50)}`); }
+    if (!p || (!p.m.photos.length && !p.m.videos.length)) continue;
+    found = true;
+    sink.length = 0;
+    if (await sendPost(c, p.t, p.m, sink)) return true;
+    dbg.push(`${name}: lấy được nhưng gửi lỗi (${sink.slice(1).join(" ").slice(0, 120)})`);
+  }
+  console.error("tiktok fail:", url, dbg.join(" | "));
+  const why = dbg.length ? `\n\n<code>${esc(dbg.join(" | ").slice(0, 600))}</code>` : "";
+  if (found && sink[0]) await send(c, `${L.sendFail}\n${sink[0]}${why}`);
+  else await send(c, L.notFound + why);
+  return false;
 }
 
 async function handleItem(c, it) {
-  it.dbg = [];
-  const p = await loadItem(it);
-  if (!p) {
-    const why = it.k === "tt" && it.dbg.length ? `\n\n<code>${esc(it.dbg.join(" | ").slice(0, 300))}</code>` : "";
-    return send(c, L.notFound + why);
-  }
-  const { t, m } = p;
-  if (!m.photos.length && !m.videos.length) return send(c, L.noMedia);
-
-  if (m.photos.length) await sendPhotos(c, t, m.photos);
-  for (let i = 0; i < m.videos.length; i++) await sendVideo(c, t, m.videos[i], !m.photos.length && i === 0);
+  if (it.k === "tt") return handleTikTok(c, it);
+  const t = await getTweet(it.id);
+  if (!t) { await send(c, L.notFound); return false; }
+  const m = getMedia(t);
+  await enrichVideos(m, it.id);
+  if (!m.photos.length && !m.videos.length) { await send(c, L.noMedia); return false; }
+  return sendPost(c, t, m);
 }
 
 /* ───────────────────────── Gửi ảnh / video ───────────────────────── */
@@ -588,7 +715,7 @@ async function sendLinks(c, urls) {
   if (buf) await send(c, buf);
 }
 
-async function sendPhotos(c, t, photos) {
+async function sendPhotos(c, t, photos, sink) {
   const asDoc = c.cf.photoAs === "document";
   const type = asDoc ? "document" : "photo";
   const method = asDoc ? "sendDocument" : "sendPhoto";
@@ -618,14 +745,22 @@ async function sendPhotos(c, t, photos) {
     if (!res.ok) failed.push(...urls);
   }
   if (failed.length) {
-    await send(c, L.sendFail);
-    await sendLinks(c, failed);
+    if (sink) sink.push(failed.join("\n"));
+    else {
+      await send(c, L.sendFail);
+      await sendLinks(c, failed);
+    }
   }
+  return !failed.length;
 }
 
-async function sendVideo(c, t, v, showCap) {
+async function sendVideo(c, t, v, showCap, sink) {
   const urls = videoUrls(v, c.cf.quality).slice(0, 3);
-  if (!urls.length) return send(c, L.sendFail);
+  if (!urls.length) {
+    if (sink) sink.push("");
+    else await send(c, L.sendFail);
+    return false;
+  }
   const gif = v.type === "gif";
   const method = gif ? "sendAnimation" : "sendVideo";
   const field = gif ? "animation" : "video";
@@ -664,8 +799,10 @@ async function sendVideo(c, t, v, showCap) {
   }
   if (!res.ok) {
     console.error("sendVideo fail:", why.join(" | "));
-    await send(c, `${L.sendFail}\n${urls[0]}\n\n<code>${esc(why.join(" | ").slice(0, 400))}</code>`);
+    if (sink) sink.push(urls[0], why.join(" | "));
+    else await send(c, `${L.sendFail}\n${urls[0]}\n\n<code>${esc(why.join(" | ").slice(0, 400))}</code>`);
   }
+  return !!res.ok;
 }
 
 /* ───────────────────────── Setup webhook ───────────────────────── */
