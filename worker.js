@@ -158,6 +158,15 @@ function send(c, text, extra = {}) {
   });
 }
 
+async function sendTemporary(c, text, seconds = 5) {
+  const res = await send(c, text);
+  if (res && res.ok && res.result && res.result.message_id) {
+    await wait(seconds * 1000);
+    await tg(c.env, "deleteMessage", { chat_id: c.chatId, message_id: res.result.message_id });
+  }
+  return res;
+}
+
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function progressText(step) {
@@ -172,13 +181,16 @@ function startLoading(c, st) {
     if (!st || !st.ok) return;
     let step = 1;
     while (!state.done) {
-      await wait(900);
+      await wait(1800);
       if (state.done) break;
-      await tg(c.env, "editMessageText", {
-        ...base(c),
-        message_id: st.result.message_id,
-        text: progressText(step),
-      });
+      // Loading chỉ là giao diện; lỗi edit Telegram không được làm hỏng việc tải media.
+      try {
+        await tg(c.env, "editMessageText", {
+          ...base(c),
+          message_id: st.result.message_id,
+          text: progressText(step),
+        });
+      } catch {}
       step = step >= 9 ? 1 : step + 1;
     }
   })();
@@ -286,7 +298,7 @@ async function onMessage(env, msg) {
   await tg(env, "sendChatAction", { ...base(c), action: "upload_photo" });
   // Cho người dùng biết Worker/API đang thức dậy, tránh nhầm là bot đã bắt đầu xử lý.
   const boot = await send(c, L.starting);
-  await wait(1500);
+  await wait(700);
   if (boot && boot.ok) await tg(env, "deleteMessage", { chat_id: c.chatId, message_id: boot.result.message_id });
   const st = await send(c, L.processing);
   const stopLoading = startLoading(c, st);
@@ -746,17 +758,17 @@ async function handleTikTok(c, it) {
     dbg.push(`${name}: lấy được nhưng gửi lỗi (${sink.slice(1).join(" ").slice(0, 120)})`);
   }
   console.error("tiktok fail:", url, dbg.join(" | "));
-  await send(c, found ? L.sendFail : L.notFound);
+  await sendTemporary(c, found ? L.sendFail : L.notFound);
   return false;
 }
 
 async function handleItem(c, it) {
   if (it.k === "tt") return handleTikTok(c, it);
   const t = await getTweet(it.id);
-  if (!t) { await send(c, L.notFound); return false; }
+  if (!t) { await sendTemporary(c, L.notFound); return false; }
   const m = getMedia(t);
   await enrichVideos(m, it.id);
-  if (!m.photos.length && !m.videos.length) { await send(c, L.noMedia); return false; }
+  if (!m.photos.length && !m.videos.length) { await sendTemporary(c, L.noMedia); return false; }
   return sendPost(c, t, m);
 }
 
@@ -804,7 +816,7 @@ async function sendPhotos(c, t, photos, sink) {
   }
   if (failed.length) {
     if (sink) sink.push(failed.join("\n"));
-    else await send(c, L.sendFail);
+    else await sendTemporary(c, L.sendFail);
   }
   return !failed.length;
 }
@@ -813,7 +825,7 @@ async function sendVideo(c, t, v, showCap, sink) {
   const urls = videoUrls(v, c.cf.quality).slice(0, 3);
   if (!urls.length) {
     if (sink) sink.push("");
-    else await send(c, L.sendFail);
+    else await sendTemporary(c, L.sendFail);
     return false;
   }
   const gif = v.type === "gif";
@@ -855,7 +867,7 @@ async function sendVideo(c, t, v, showCap, sink) {
   if (!res.ok) {
     console.error("sendVideo fail:", why.join(" | "));
     if (sink) sink.push(urls[0], why.join(" | "));
-    else await send(c, L.sendFail);
+    else await sendTemporary(c, L.sendFail);
   }
   return !!res.ok;
 }
