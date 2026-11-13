@@ -14,13 +14,11 @@ const FX_API = "https://api.fxtwitter.com";
 const LINK_RE =
   /https?:\/\/(?:www\.|mobile\.)?(?:x\.com|twitter\.com|fxtwitter\.com|fixupx\.com|vxtwitter\.com|fixvx\.com|t\.co)\/[^\s<>"']+/gi;
 const TT_RE = /https?:\/\/(?:(?:www|m|vm|vt)\.)?tiktok\.com\/[^\s<>"']+/gi;
-const IG_RE = /https?:\/\/(?:www\.)?instagram\.com\/(?:p|reel|reels|tv)\/[A-Za-z0-9_-]+[^\s<>"']*/gi;
-const ANY_RE = new RegExp(`${LINK_RE.source}|${TT_RE.source}|${IG_RE.source}`, "gi");
+const ANY_RE = new RegExp(`${LINK_RE.source}|${TT_RE.source}`, "gi");
 const STATUS_RE = /\/status(?:es)?\/(\d{5,25})/i;
 const TT_ID_RE = /\/(?:video|photo)\/(\d{8,25})/i;
-const IG_ID_RE = /\/(?:p|reel|reels|tv)\/([A-Za-z0-9_-]+)/i;
 // Link "trang bài viết" (khác với link file ảnh/video được giấu trong caption)
-const PAGE_RE = /^https?:\/\/(?:www\.|mobile\.|m\.)?(?:x\.com|twitter\.com|tiktok\.com|instagram\.com)\//i;
+const PAGE_RE = /^https?:\/\/(?:www\.|mobile\.|m\.)?(?:x\.com|twitter\.com|tiktok\.com)\//i;
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 const TG_UPLOAD_MAX = 49 * 1024 * 1024; // bot upload tối đa 50MB (gửi bằng link chỉ 20MB)
@@ -29,11 +27,11 @@ const ZW = "\u200b"; // ký tự vô hình để giấu link trong caption
 /* ───────────────────────── Nội dung (tiếng Việt) ───────────────────────── */
 const L = {
   start:
-    "👋 Gửi link <b>X</b>, <b>TikTok</b> hoặc <b>Instagram</b>, mình gửi ảnh/video về ngay.\n\n💡 Muốn lấy <b>link gốc</b>: reply vào ảnh/video bot vừa gửi.\n\n❓ /help để xem hướng dẫn chi tiết",
+    "👋 Gửi link <b>X</b> hoặc <b>TikTok</b>, mình gửi ảnh/video về ngay.\n\n💡 Muốn lấy <b>link gốc</b>: reply vào ảnh/video bot vừa gửi.\n\n❓ /help để xem hướng dẫn chi tiết",
   help:
     "📖 <b>Hướng dẫn sử dụng</b>\n\n" +
     "<b>1️⃣ Tải ảnh / video</b>\n" +
-    "Dán link X/Twitter, TikTok hoặc Instagram vào chat (dán nhiều link một lúc cũng được). Bot gửi ngay ảnh và video, không cần bấm gì.\n\n" +
+    "Dán link X/Twitter hoặc TikTok vào chat (dán nhiều link một lúc cũng được). Bot gửi ngay ảnh và video, không cần bấm gì.\n\n" +
     "<b>2️⃣ Lấy link ảnh / video gốc</b>\n" +
     "Reply (trả lời) vào ảnh hoặc video bot vừa gửi bằng một tin nhắn bất kỳ, ví dụ <code>link</code>. Bot sẽ gửi link chất lượng gốc. Bài nhiều ảnh được gửi gộp thành album: reply vào album đó, bot gửi danh sách link đánh số 1, 2, 3… theo thứ tự ảnh.\n\n" +
     "<b>3️⃣ Lưu ý</b>\n" +
@@ -41,7 +39,7 @@ const L = {
     "• TikTok: video không logo (HD nếu có); bài slideshow được gửi dạng ảnh.\n" +
     "• Video nặng hơn 50MB bot không gửi được file, sẽ gửi link để bạn tự tải.\n" +
     "• Bài riêng tư, đã xoá hoặc bị ẩn thì không tải được.",
-  notLink: "🤔 Mình chưa thấy link X, TikTok hoặc Instagram nào. Gõ /help để xem hướng dẫn.",
+  notLink: "🤔 Mình chưa thấy link X/Twitter hay TikTok nào. Gõ /help để xem hướng dẫn.",
   notFound: "⚠️ Không tải được nội dung này.",
   noMedia: "ℹ️ Bài viết này không có ảnh hay video.",
   sendFail: "⚠️ Không gửi được file này.",
@@ -159,6 +157,30 @@ function send(c, text, extra = {}) {
   });
 }
 
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function startLoading(c, st) {
+  const state = { done: false };
+  const run = (async () => {
+    if (!st || !st.ok) return;
+    let dots = 1;
+    while (!state.done) {
+      await wait(800);
+      if (state.done) break;
+      await tg(c.env, "editMessageText", {
+        ...base(c),
+        message_id: st.result.message_id,
+        text: `⏳ Đang xử lý${".".repeat(dots)}`,
+      });
+      dots = (dots % 3) + 1;
+    }
+  })();
+  return async () => {
+    state.done = true;
+    await run;
+  };
+}
+
 /* ── Caption: link bài viết (hiện) + link file gốc (giấu) ── */
 // Link file gốc được giấu trong caption dưới dạng ký tự vô hình. Khi bạn reply vào ảnh/video đó,
 // bot đọc lại link này từ tin nhắn được reply — nên không cần database.
@@ -256,16 +278,18 @@ async function onMessage(env, msg) {
 
   await tg(env, "sendChatAction", { ...base(c), action: "upload_photo" });
   const st = await send(c, L.processing);
+  const stopLoading = startLoading(c, st);
   const results = [];
   try {
     for (const it of items) results.push(await handleItem(c, it));
   } finally {
+    await stopLoading();
     if (st && st.ok) await tg(env, "deleteMessage", { chat_id: c.chatId, message_id: st.result.message_id });
   }
   // Chỉ xoá tin nhắn của người dùng khi: toàn link X/TikTok, gửi thành công hết,
   // và tin nhắn không có chữ nào khác ngoài link.
   const raw = msg.text || msg.caption || "";
-  if (cf.deleteX && items.every((i) => i.k === "x" || i.k === "tt" || i.k === "ig") && results.every(Boolean) && !raw.replace(ANY_RE, "").trim()) {
+  if (cf.deleteX && items.every((i) => i.k === "x" || i.k === "tt") && results.every(Boolean) && !raw.replace(ANY_RE, "").trim()) {
     await tg(env, "deleteMessage", { chat_id: c.chatId, message_id: msg.message_id });
   }
 }
@@ -303,11 +327,6 @@ async function resolveTikTok(u) {
   return { id: null, url: orig };
 }
 
-function resolveInstagram(u) {
-  const m = u.match(IG_ID_RE);
-  return m ? { id: m[1], url: u } : { id: null, url: u };
-}
-
 async function extractItems(text, max) {
   const links = [...new Set((text.match(ANY_RE) || []).map(cleanUrl))];
   const out = [];
@@ -318,9 +337,6 @@ async function extractItems(text, max) {
     if (/tiktok\.com/i.test(u)) {
       const r = await resolveTikTok(u);
       if (r && !out.some((o) => o.k === "tt" && (r.id ? o.id === r.id : o.url === r.url))) out.push({ k: "tt", ...r });
-    } else if (/instagram\.com/i.test(u)) {
-      const r = resolveInstagram(u);
-      if (r && r.id && !out.some((o) => o.k === "ig" && o.id === r.id)) out.push({ k: "ig", ...r });
     } else {
       const m = u.match(STATUS_RE);
       if (m && !out.some((o) => o.k === "x" && o.id === m[1])) out.push({ k: "x", id: m[1] });
@@ -687,104 +703,6 @@ async function ttFromLovetik(url, dbg) {
   return mkTT(j.vid, j.author_id || j.author, j.author, (j.images || []).map(imgUrl), vids);
 }
 
-/* ───────────────────────── Instagram public post / Reel ───────────────────────── */
-function igDecodeUrl(s) {
-  return String(s || "")
-    .replace(/\\u0026/g, "&")
-    .replace(/\\u003D/gi, "=")
-    .replace(/\\\\\//g, "/")
-    .replace(/\\\//g, "/")
-    .replace(/&amp;/g, "&");
-}
-
-function igMeta(html, key) {
-  for (const tag of html.match(/<meta\b[^>]*>/gi) || []) {
-    const a = {};
-    for (const m of tag.matchAll(/([\w:-]+)\s*=\s*["']([^"']*)["']/g)) a[m[1].toLowerCase()] = m[2];
-    if ((a.property || a.name || "").toLowerCase() === key) return igDecodeUrl(a.content);
-  }
-  return "";
-}
-
-function igMediaFromHtml(html) {
-  const images = [];
-  const videos = [];
-  const add = (arr, u) => {
-    u = igDecodeUrl(u);
-    if (!/^https?:\/\//i.test(u) || arr.includes(u)) return;
-    arr.push(u);
-  };
-  for (const m of html.matchAll(/\\?"(?:display_url|thumbnail_src)\\?"\s*:\s*\\?"([^"]+)/g)) add(images, m[1]);
-  for (const m of html.matchAll(/\\?"video_url\\?"\s*:\s*\\?"([^"]+)/g)) add(videos, m[1]);
-  add(images, igMeta(html, "og:image"));
-  add(videos, igMeta(html, "og:video"));
-  return { images, videos };
-}
-
-async function igFromPage(url, dbg) {
-  const canonical = url.split("?")[0].replace(/\/?$/, "");
-  const pages = [url, canonical, `${canonical}/embed/`, `${canonical}/?__a=1&__d=dis`];
-  for (const page of pages) {
-    try {
-      const r = await fetch(page, {
-        redirect: "follow",
-        headers: {
-          "User-Agent": UA,
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.9",
-        },
-      });
-      if (!r.ok) { dbg.push(`Instagram HTTP ${r.status}`); continue; }
-      const media = igMediaFromHtml(await r.text());
-      if (media.images.length || media.videos.length) {
-        const t = { platform: "ig", id: "", url, author: { name: "Instagram", screen_name: "" } };
-        const headers = { "User-Agent": UA, Referer: "https://www.instagram.com/" };
-        const m = {
-          photos: media.images.map((u) => ({ url: u, headers })),
-          videos: media.videos.map((u) => ({ type: "video", url: u, headers, variants: [{ url: u, content_type: "video/mp4" }] })),
-        };
-        return { t, m };
-      }
-    } catch (e) {
-      dbg.push(`Instagram ${String(e).slice(0, 40)}`);
-    }
-  }
-  return null;
-}
-
-// Dự phòng khi Instagram trả trang đăng nhập/challenge cho IP của Cloudflare.
-// Jina chỉ đọc nội dung công khai, không truy cập bài riêng tư.
-async function igFromJina(url, dbg) {
-  try {
-    const r = await fetch(`https://r.jina.ai/http://${url.replace(/^https?:\/\//i, "")}`, {
-      headers: { "User-Agent": UA, Accept: "text/plain" },
-    });
-    if (!r.ok) { dbg.push(`Jina HTTP ${r.status}`); return null; }
-    const text = await r.text();
-    const images = [];
-    const videos = [];
-    for (const m of text.matchAll(/!\[[^\]]*\]\((https?:\/\/[^)]+)\)/g)) {
-      const u = igDecodeUrl(m[1]);
-      if (/\.mp4(?:\?|$)/i.test(u)) videos.push(u);
-      else if (/scontent.*\/v\/t51\.[^/]+-15\//i.test(u) && !/s150x150/i.test(u)) images.push(u);
-    }
-    const uniq = (a) => [...new Set(a)];
-    const imgs = uniq(images), vids = uniq(videos);
-    if (!imgs.length && !vids.length) return null;
-    const headers = { "User-Agent": UA, Referer: "https://www.instagram.com/" };
-    return {
-      t: { platform: "ig", id: "", url, author: { name: "Instagram", screen_name: "" } },
-      m: {
-        photos: imgs.map((u) => ({ url: u, headers })),
-        videos: vids.map((u) => ({ type: "video", url: u, headers, variants: [{ url: u, content_type: "video/mp4" }] })),
-      },
-    };
-  } catch (e) {
-    dbg.push(`Jina ${String(e).slice(0, 40)}`);
-    return null;
-  }
-}
-
 const TT_SOURCES = [
   ["trang TikTok", ttFromPage],
   ["tikwm", ttFromTikwm],
@@ -821,24 +739,8 @@ async function handleTikTok(c, it) {
   return false;
 }
 
-async function handleInstagram(c, it) {
-  const dbg = [];
-  const p = (await igFromPage(it.url, dbg)) || (await igFromJina(it.url, dbg));
-  if (!p || (!p.m.photos.length && !p.m.videos.length)) {
-    console.error("instagram fail:", it.url, dbg.join(" | "));
-    await send(c, L.notFound);
-    return false;
-  }
-  const sink = [];
-  if (await sendPost(c, p.t, p.m, sink)) return true;
-  console.error("instagram send fail:", it.url, sink.join(" | "));
-  await send(c, L.sendFail);
-  return false;
-}
-
 async function handleItem(c, it) {
   if (it.k === "tt") return handleTikTok(c, it);
-  if (it.k === "ig") return handleInstagram(c, it);
   const t = await getTweet(it.id);
   if (!t) { await send(c, L.notFound); return false; }
   const m = getMedia(t);
