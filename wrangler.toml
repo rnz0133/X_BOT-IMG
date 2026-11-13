@@ -1,32 +1,19 @@
 # ═══════════════════════════════════════════════════════════
-#  X (Twitter) Downloader Bot — cấu hình Cloudflare Worker
+#  X (Twitter) + TikTok Downloader Bot — cấu hình Cloudflare Worker
 # ═══════════════════════════════════════════════════════════
 name = "x-downloader-bot"
 main = "worker.js"
 compatibility_date = "2025-06-01"
 
-# ── Biến cấu hình ──────────────────────────────────────────
 [vars]
-# Ngôn ngữ mặc định: "vi" | "en"
-DEFAULT_LANG = "vi"
-
-# Chất lượng video mặc định: "best" | "medium" | "low"
+# Chất lượng video: "best" (nét nhất) | "medium" | "low"
 DEFAULT_QUALITY = "best"
 
-# Gửi ảnh dạng: "photo" (Telegram nén) | "document" (file gốc, không nén)
+# Gửi ảnh dạng: "photo" (Telegram nén, xem nhanh) | "document" (file gốc, không nén)
 DEFAULT_PHOTO_AS = "photo"
 
-# Chế độ tự động sau khi gửi link:
-#   "off"   = hiện nút bấm
-#   "links" = tự gửi link direct của mọi ảnh/video
-#   "files" = tự gửi luôn file ảnh/video
-DEFAULT_AUTO = "off"
-
-# Kèm caption (link bài viết) khi gửi file: "true" | "false"
+# Kèm dòng tên tác giả (link bài viết) dưới ảnh/video: "true" | "false"
 DEFAULT_CAPTION = "true"
-
-# Hiện lượt like/retweet/view trong khung xem trước: "true" | "false"
-SHOW_TWEET_STATS = "true"
 
 # Số link tối đa xử lý trong 1 tin nhắn
 MAX_LINKS_PER_MESSAGE = "3"
@@ -34,12 +21,6 @@ MAX_LINKS_PER_MESSAGE = "3"
 # Chỉ cho phép các user ID này dùng bot (cách nhau bằng dấu phẩy). Để trống = ai cũng dùng được
 # Ví dụ: "123456789,987654321"
 ALLOWED_USERS = ""
-
-# Admin ID (dùng được lệnh /stats)
-ADMIN_IDS = ""
-
-# Bật đếm thống kê (cần gắn KV; hiện đã tắt KV nên để "false"): "true" | "false"
-ENABLE_STATS = "false"
 
 # ── SECRETS (KHÔNG ghi vào file này) ───────────────────────
 #   npx wrangler secret put BOT_TOKEN        ← token từ @BotFather

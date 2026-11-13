@@ -1,12 +1,10 @@
 /**
  * X (Twitter) + TikTok Downloader Bot — Cloudflare Worker
  * ------------------------------------------------
- * • Gửi link X/Twitter hoặc TikTok → bot hiện nút bấm
- * • Chạm vào ảnh nào → gửi NGAY link direct (chất lượng gốc) của ảnh đó
- * • Tải video / GIF / ảnh / nhạc về thẳng Telegram
- * • Video X: tự chọn bản độ phân giải cao nhất (lấy danh sách đầy đủ từ X)
- * • TikTok: video không logo (HD nếu có), slideshow ảnh, nhạc
- * • /settings: ngôn ngữ, chất lượng video, gửi ảnh dạng photo/file, chế độ tự động, caption
+ * • Gửi link X/Twitter hoặc TikTok → bot gửi NGAY ảnh / video (không nút bấm, không khung xem trước)
+ * • Muốn lấy link gốc: reply vào ảnh/video bot vừa gửi bằng tin nhắn bất kỳ → bot gửi link của đúng ảnh/video đó
+ * • Video X: tự chọn bản độ phân giải cao nhất; TikTok: không logo (HD nếu có), slideshow gửi dạng ảnh
+ * • Không cần KV
  *
  * Cấu hình: xem wrangler.toml  |  Secrets: BOT_TOKEN, WEBHOOK_SECRET
  * Nguồn dữ liệu: api.fxtwitter.com + cdn.syndication.twimg.com (X), tikwm.com (TikTok) — không cần API key
@@ -20,78 +18,33 @@ const TT_RE = /https?:\/\/(?:(?:www|m|vm|vt)\.)?tiktok\.com\/[^\s<>"']+/gi;
 const ANY_RE = new RegExp(`${LINK_RE.source}|${TT_RE.source}`, "gi");
 const STATUS_RE = /\/status(?:es)?\/(\d{5,25})/i;
 const TT_ID_RE = /\/(?:video|photo)\/(\d{8,25})/i;
+// Link "trang bài viết" (khác với link file ảnh/video được giấu trong caption)
+const PAGE_RE = /^https?:\/\/(?:www\.|mobile\.|m\.)?(?:x\.com|twitter\.com|tiktok\.com)\//i;
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
-const TG_UPLOAD_MAX = 49 * 1024 * 1024; // Telegram cho bot upload tối đa 50MB (gửi bằng link chỉ 20MB)
+const TG_UPLOAD_MAX = 49 * 1024 * 1024; // bot upload tối đa 50MB (gửi bằng link chỉ 20MB)
+const ZW = "\u200b"; // ký tự vô hình để giấu link trong caption
 
-/* ───────────────────────── Ngôn ngữ ───────────────────────── */
-const T = {
-  vi: {
-    start:
-      "👋 <b>Chào mừng bạn!</b>\n\nGửi mình link <b>X (Twitter)</b> hoặc <b>TikTok</b>, mình sẽ giúp bạn:\n🔗 Lấy <b>link direct</b> ảnh gốc — chạm vào ảnh nào, gửi link ảnh đó ngay\n🖼 Tải ảnh chất lượng cao\n🎬 Tải video / GIF (X: bản nét nhất, TikTok: không logo)\n🎵 Tải nhạc TikTok\n\n⚙️ /settings để tuỳ chỉnh • ❓ /help để xem hướng dẫn",
-    help:
-      "📖 <b>Hướng dẫn</b>\n\n1️⃣ Dán link bài viết X/Twitter hoặc video TikTok (có thể dán nhiều link một lúc)\n2️⃣ Bấm nút bên dưới:\n   • <b>🔗 Ảnh 1, Ảnh 2…</b> → nhận link direct của ảnh đó ngay\n   • <b>🔗 Tất cả link</b> → nhận link của mọi ảnh\n   • <b>📥 Tải ảnh</b> → bot gửi file ảnh\n   • <b>🎬 Video</b> → bot gửi video\n   • <b>🎵 Nhạc</b> → bot gửi nhạc nền (TikTok)\n\n💡 Mẹo: /settings → bật <b>Tự động</b> để bot gửi luôn link/file mà không cần bấm nút.",
-    notLink: "🤔 Mình chưa thấy link X/Twitter hay TikTok nào. Hãy gửi link dạng <code>https://x.com/user/status/123…</code> hoặc <code>https://vt.tiktok.com/…</code>",
-    notFound: "😕 Không lấy được bài viết này (có thể bị xoá, ẩn hoặc tài khoản riêng tư).",
-    noMedia: "ℹ️ Bài viết này không có ảnh hay video.",
-    working: "⏳ Đang xử lý…",
-    photo: "Ảnh",
-    video: "Video",
-    music: "Nhạc",
-    allLinks: "Tất cả link",
-    sendPhotos: "Tải ảnh",
-    sendFail: "⚠️ Telegram không nhận được file (có thể quá nặng, giới hạn 50MB). Đây là link direct:",
-    denied: "⛔ Bạn không có quyền dùng bot này.",
-    noKV: "⚠️ Chủ bot chưa bật KV nên cài đặt không được lưu.",
-    settingsTitle: "⚙️ <b>Cài đặt</b>\nChạm để thay đổi:",
-    sLang: "🌐 Ngôn ngữ",
-    sQuality: "🎞 Chất lượng video",
-    sPhotoAs: "🖼 Gửi ảnh dạng",
-    sAuto: "🤖 Chế độ tự động",
-    sCaption: "📝 Caption",
-    q: { best: "Cao nhất", medium: "Vừa", low: "Thấp" },
-    pa: { photo: "Ảnh (nén)", document: "File (gốc)" },
-    au: { off: "Tắt", links: "Gửi link", files: "Gửi file" },
-    on: "Bật",
-    off: "Tắt",
-    saved: "✅ Đã lưu",
-    tapHint: "👆 Chạm số ảnh để nhận link direct",
-    photos: "ảnh",
-    videos: "video",
-  },
-  en: {
-    start:
-      "👋 <b>Welcome!</b>\n\nSend me an <b>X (Twitter)</b> or <b>TikTok</b> link and I'll help you:\n🔗 Get <b>direct links</b> to original images — tap an image, get its link instantly\n🖼 Download high-quality photos\n🎬 Download videos / GIFs (X: best quality, TikTok: no watermark)\n🎵 Download TikTok music\n\n⚙️ /settings to customize • ❓ /help for instructions",
-    help:
-      "📖 <b>How to use</b>\n\n1️⃣ Paste an X/Twitter post or TikTok video link (multiple links are fine)\n2️⃣ Tap a button:\n   • <b>🔗 Photo 1, Photo 2…</b> → instantly get that photo's direct link\n   • <b>🔗 All links</b> → links for every photo\n   • <b>📥 Download photos</b> → bot sends the files\n   • <b>🎬 Video</b> → bot sends the video\n   • <b>🎵 Music</b> → bot sends the sound (TikTok)\n\n💡 Tip: /settings → enable <b>Auto</b> mode to skip the buttons.",
-    notLink: "🤔 I couldn't find an X/Twitter or TikTok link. Send something like <code>https://x.com/user/status/123…</code> or <code>https://vt.tiktok.com/…</code>",
-    notFound: "😕 Couldn't fetch this post (deleted, hidden or from a private account).",
-    noMedia: "ℹ️ This post has no photos or videos.",
-    working: "⏳ Working…",
-    photo: "Photo",
-    video: "Video",
-    music: "Music",
-    allLinks: "All links",
-    sendPhotos: "Download photos",
-    sendFail: "⚠️ Telegram couldn't accept the file (maybe too large, 50MB limit). Here is the direct link:",
-    denied: "⛔ You are not allowed to use this bot.",
-    noKV: "⚠️ The bot owner hasn't enabled KV, so settings can't be saved.",
-    settingsTitle: "⚙️ <b>Settings</b>\nTap to change:",
-    sLang: "🌐 Language",
-    sQuality: "🎞 Video quality",
-    sPhotoAs: "🖼 Send photos as",
-    sAuto: "🤖 Auto mode",
-    sCaption: "📝 Caption",
-    q: { best: "Best", medium: "Medium", low: "Low" },
-    pa: { photo: "Photo (compressed)", document: "File (original)" },
-    au: { off: "Off", links: "Send links", files: "Send files" },
-    on: "On",
-    off: "Off",
-    saved: "✅ Saved",
-    tapHint: "👆 Tap a photo number to get its direct link",
-    photos: "photos",
-    videos: "videos",
-  },
+/* ───────────────────────── Nội dung (tiếng Việt) ───────────────────────── */
+const L = {
+  start:
+    "👋 Gửi link <b>X (Twitter)</b> hoặc <b>TikTok</b>, mình gửi ảnh/video về ngay.\n\n💡 Muốn lấy <b>link gốc</b> của ảnh/video: <b>reply</b> vào đó bằng một tin nhắn bất kỳ.\n\n❓ /help để xem hướng dẫn chi tiết",
+  help:
+    "📖 <b>Hướng dẫn sử dụng</b>\n\n" +
+    "<b>1️⃣ Tải ảnh / video</b>\n" +
+    "Dán link bài viết X/Twitter hoặc video TikTok vào chat (dán nhiều link một lúc cũng được). Bot gửi ngay ảnh và video, không cần bấm gì.\n\n" +
+    "<b>2️⃣ Lấy link ảnh / video gốc</b>\n" +
+    "Reply (trả lời) vào ảnh hoặc video bot vừa gửi bằng một tin nhắn bất kỳ, ví dụ <code>link</code>. Bot sẽ gửi link chất lượng gốc của đúng ảnh/video đó. Bài có nhiều ảnh thì reply vào ảnh nào nhận link ảnh đó.\n\n" +
+    "<b>3️⃣ Lưu ý</b>\n" +
+    "• Video X: bot tự chọn bản nét nhất có thể (nếu người đăng chỉ up 720p thì chỉ có 720p).\n" +
+    "• TikTok: video không logo (HD nếu có); bài slideshow được gửi dạng ảnh.\n" +
+    "• Video nặng hơn 50MB bot không gửi được file, sẽ gửi link để bạn tự tải.\n" +
+    "• Bài riêng tư, đã xoá hoặc bị ẩn thì không tải được.",
+  notLink: "🤔 Mình chưa thấy link X/Twitter hay TikTok nào. Gõ /help để xem hướng dẫn.",
+  notFound: "😕 Không lấy được bài viết này (có thể đã xoá, bị ẩn hoặc tài khoản riêng tư).",
+  noMedia: "ℹ️ Bài viết này không có ảnh hay video.",
+  sendFail: "⚠️ Telegram không nhận được file (có thể quá nặng, giới hạn 50MB). Đây là link:",
+  denied: "⛔ Bạn không có quyền dùng bot này.",
 };
 
 /* ───────────────────────── Entry ───────────────────────── */
@@ -127,37 +80,10 @@ function cfg(env) {
   return {
     maxLinks: parseInt(env.MAX_LINKS_PER_MESSAGE, 10) || 3,
     allowed: list(env.ALLOWED_USERS),
-    admins: list(env.ADMIN_IDS),
-    showStats: env.SHOW_TWEET_STATS !== "false",
-    enableStats: env.ENABLE_STATS === "true",
-    defaults: {
-      lang: env.DEFAULT_LANG === "en" ? "en" : "vi",
-      quality: ["best", "medium", "low"].includes(env.DEFAULT_QUALITY) ? env.DEFAULT_QUALITY : "best",
-      photoAs: env.DEFAULT_PHOTO_AS === "document" ? "document" : "photo",
-      auto: ["off", "links", "files"].includes(env.DEFAULT_AUTO) ? env.DEFAULT_AUTO : "off",
-      caption: env.DEFAULT_CAPTION !== "false",
-    },
+    quality: ["best", "medium", "low"].includes(env.DEFAULT_QUALITY) ? env.DEFAULT_QUALITY : "best",
+    photoAs: env.DEFAULT_PHOTO_AS === "document" ? "document" : "photo",
+    caption: env.DEFAULT_CAPTION !== "false",
   };
-}
-
-async function getUser(env, id, cf) {
-  if (!env.KV) return { ...cf.defaults };
-  try {
-    const saved = await env.KV.get(`u:${id}`, "json");
-    return { ...cf.defaults, ...(saved || {}) };
-  } catch {
-    return { ...cf.defaults };
-  }
-}
-async function saveUser(env, id, user) {
-  if (env.KV) await env.KV.put(`u:${id}`, JSON.stringify(user));
-}
-async function bump(env, cf, key) {
-  if (!cf.enableStats || !env.KV) return;
-  try {
-    const n = parseInt((await env.KV.get(`stat:${key}`)) || "0", 10);
-    await env.KV.put(`stat:${key}`, String(n + 1));
-  } catch {}
 }
 const isAllowed = (cf, id) => cf.allowed.length === 0 || cf.allowed.includes(String(id));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -209,10 +135,24 @@ function send(c, text, extra = {}) {
   });
 }
 
+/* ── Caption: link bài viết (hiện) + link file gốc (giấu) ── */
+// Link file gốc được giấu trong caption dưới dạng ký tự vô hình. Khi bạn reply vào ảnh/video đó,
+// bot đọc lại link này từ tin nhắn được reply — nên không cần database.
+const hid = (u) => `<a href="${esc(u).replace(/"/g, "%22")}">${ZW}</a>`;
+const capLine = (c, t) => (c.cf.caption ? `${t.platform === "tt" ? "🎵" : "🐦"} <a href="${esc(t.url || "")}">@${esc(t.author?.screen_name || "")}</a>` : "");
+const capFor = (c, t, mediaUrl, visible) => (visible ? capLine(c, t) : "") + hid(mediaUrl);
+
+// Lấy link file gốc từ tin nhắn mà người dùng reply tới (chỉ tin của bot)
+function replyMediaUrl(msg) {
+  const r = msg.reply_to_message;
+  if (!r || !r.from || !r.from.is_bot) return null;
+  const e = (r.caption_entities || r.entities || []).find((x) => x.type === "text_link" && x.url && !PAGE_RE.test(x.url));
+  return e ? e.url : null;
+}
+
 /* ───────────────────────── Router ───────────────────────── */
 async function handleUpdate(update, env) {
   if (update.message) return onMessage(env, update.message);
-  if (update.callback_query) return onCallback(env, update.callback_query);
 }
 
 async function onMessage(env, msg) {
@@ -220,11 +160,9 @@ async function onMessage(env, msg) {
   const from = msg.from;
   if (!from || from.is_bot) return;
 
-  const user = await getUser(env, from.id, cf);
-  const L = T[user.lang] || T.vi;
   const isPrivate = msg.chat.type === "private";
   const c = {
-    env, cf, L, user,
+    env, cf,
     chatId: msg.chat.id,
     thread: msg.is_topic_message ? msg.message_thread_id : undefined,
     replyTo: msg.message_id,
@@ -248,20 +186,21 @@ async function onMessage(env, msg) {
     switch (cmd[1].toLowerCase()) {
       case "start": return send(c, L.start);
       case "help": return send(c, L.help);
-      case "settings": return showSettings(c);
-      case "stats": return showStats(c);
       default: return;
     }
   }
 
-  // Tìm link
+  // Tìm link bài viết
   const items = await extractItems(text, cf.maxLinks);
   if (!items.length) {
+    // Không có link → có thể là reply vào ảnh/video của bot để xin link gốc
+    const u = replyMediaUrl(msg);
+    if (u) return send(c, u);
     if (isPrivate) await send(c, L.notLink);
     return;
   }
 
-  await tg(env, "sendChatAction", { ...base(c), action: "typing" });
+  await tg(env, "sendChatAction", { ...base(c), action: "upload_photo" });
   for (const it of items) await handleItem(c, it);
 }
 
@@ -369,7 +308,6 @@ function getMedia(t) {
     srcId: src.id || t.id,
     photos: (m.photos || []).slice(0, 10).map((p) => ({ url: origPhoto(p.url) })),
     videos: (m.videos || []).slice(0, 10),
-    music: null,
   };
 }
 
@@ -463,12 +401,7 @@ function normTikTok(d) {
     platform: "tt",
     id: d.id,
     url: `https://www.tiktok.com/@${uid}/video/${d.id}`,
-    text: d.title || "",
     author: { name: a.nickname || uid, screen_name: uid },
-    replies: d.comment_count,
-    retweets: d.share_count,
-    likes: d.digg_count,
-    views: d.play_count,
   };
   const m = {
     photos: imgs.map((url) => ({ url })),
@@ -476,9 +409,6 @@ function normTikTok(d) {
       !imgs.length && variants.length
         ? [{ type: "video", url: variants[0].url, variants, duration: d.duration || undefined }]
         : [],
-    music: d.music
-      ? { url: ttAbs(d.music), title: (d.music_info && d.music_info.title) || "TikTok", performer: (d.music_info && d.music_info.author) || uid }
-      : null,
   };
   return { t, m };
 }
@@ -499,150 +429,77 @@ async function getTikTok(id, url) {
   return post;
 }
 
-/* ───────────────────────── Tải bài viết (chung) ───────────────────────── */
-// pid: ID tweet (số) hoặc "T" + ID video TikTok
-async function loadPost(pid, url) {
-  if (pid[0] === "T") return getTikTok(pid.slice(1), url);
-  const t = await getTweet(pid);
+/* ───────────────────────── Xử lý 1 link ───────────────────────── */
+async function loadItem(it) {
+  if (it.k === "tt") return getTikTok(it.id, it.url);
+  const t = await getTweet(it.id);
   if (!t) return null;
   const m = getMedia(t);
-  await enrichVideos(m, pid);
+  await enrichVideos(m, it.id);
   return { t, m };
 }
 
-const fmt = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "K" : String(n ?? 0));
-
-function previewText(c, t, m) {
-  const a = t.author || {};
-  let s = `<b>${esc(a.name || "")}</b> (@${esc(a.screen_name || "")})\n`;
-  const body = (t.text || "").trim();
-  if (body) s += `\n${esc(body.length > 300 ? body.slice(0, 300) + "…" : body)}\n`;
-  if (c.cf.showStats) s += `\n💬 ${fmt(t.replies)}  🔁 ${fmt(t.retweets)}  ❤️ ${fmt(t.likes)}${t.views ? `  👁 ${fmt(t.views)}` : ""}`;
-  const parts = [];
-  if (m.photos.length) parts.push(`🖼 ${m.photos.length} ${c.L.photos}`);
-  if (m.videos.length) parts.push(`🎬 ${m.videos.length} ${c.L.videos}`);
-  if (m.music) parts.push("🎵");
-  s += `\n${parts.join(" • ")}`;
-  if (m.photos.length) s += `\n\n${c.L.tapHint}`;
-  return s;
-}
-
-function keyboard(c, pid, m) {
-  const L = c.L;
-  const rows = [];
-  const n = m.photos.length;
-  if (n) {
-    const per = n <= 4 ? 2 : 5;
-    const btns = m.photos.map((_, i) => ({
-      text: n <= 4 ? `🔗 ${L.photo} ${i + 1}` : `🔗 ${i + 1}`,
-      callback_data: `i:${pid}:${i}`,
-    }));
-    for (let i = 0; i < btns.length; i += per) rows.push(btns.slice(i, i + per));
-    if (n > 1) rows.push([{ text: `🔗 ${L.allLinks}`, callback_data: `ia:${pid}` }]);
-    rows.push([{ text: `📥 ${L.sendPhotos}`, callback_data: `pf:${pid}` }]);
-  }
-  m.videos.forEach((v, i) => {
-    const q = v.height ? ` ${v.height}p` : "";
-    rows.push([{ text: `🎬 ${v.type === "gif" ? "GIF" : L.video} ${i + 1}${q}`, callback_data: `vs:${pid}:${i}` }]);
-  });
-  if (m.music) rows.push([{ text: `🎵 ${L.music}`, callback_data: `mu:${pid}` }]);
-  return rows;
-}
-
 async function handleItem(c, it) {
-  const p = it.k === "tt" ? await getTikTok(it.id, it.url) : await loadPost(it.id);
-  if (!p) return send(c, c.L.notFound);
-  const pid = it.k === "tt" ? `T${p.t.id}` : it.id;
+  const p = await loadItem(it);
+  if (!p) return send(c, L.notFound);
   const { t, m } = p;
-  if (!m.photos.length && !m.videos.length) return send(c, c.L.noMedia);
+  if (!m.photos.length && !m.videos.length) return send(c, L.noMedia);
 
-  await bump(c.env, c.cf, "requests");
-  await send(c, previewText(c, t, m), { reply_markup: { inline_keyboard: keyboard(c, pid, m) } });
-
-  if (c.user.auto === "files") {
-    if (m.photos.length) await sendPhotos(c, t, m.photos);
-    for (let i = 0; i < m.videos.length; i++) await sendVideo(c, t, m.videos[i]);
-  } else if (c.user.auto === "links") {
-    await sendLinks(c, linesFor(c, m, { photos: "all", videos: true }));
-  }
+  if (m.photos.length) await sendPhotos(c, t, m.photos);
+  for (let i = 0; i < m.videos.length; i++) await sendVideo(c, t, m.videos[i], !m.photos.length && i === 0);
 }
 
-/* ───────────────────────── Gửi link / file ───────────────────────── */
-function linesFor(c, m, { photos, videos }) {
-  const out = [];
-  const L = c.L;
-  const pick = (arr, sel) => (sel === "all" ? arr.map((x, i) => [x, i]) : typeof sel === "number" && arr[sel] ? [[arr[sel], sel]] : []);
-  for (const [p, i] of pick(m.photos, photos)) out.push(`🖼 ${L.photo} ${i + 1}\n${p.url}`);
-  if (videos) {
-    m.videos.forEach((v, i) => {
-      const u = videoUrls(v, c.user.quality)[0];
-      if (u) out.push(`🎬 ${L.video} ${i + 1}${v.height ? ` ${v.height}p` : ""}\n${u}`);
-    });
-  }
-  return out;
-}
-
-async function sendLinks(c, lines) {
-  if (!lines.length) return;
+/* ───────────────────────── Gửi ảnh / video ───────────────────────── */
+async function sendLinks(c, urls) {
   let buf = "";
-  for (const l of lines) {
-    if ((buf + l).length > 3800) {
+  for (const u of urls) {
+    if ((buf + u).length > 3800) {
       await send(c, buf);
       buf = "";
     }
-    buf += (buf ? "\n\n" : "") + l;
+    buf += (buf ? "\n\n" : "") + u;
   }
   if (buf) await send(c, buf);
 }
 
-const capLine = (c, t) => {
-  if (!c.user.caption) return undefined;
-  const sn = t.author?.screen_name || "";
-  return `${t.platform === "tt" ? "🎵" : "🐦"} <a href="${esc(t.url || "")}">@${esc(sn)}</a>`;
-};
-
 async function sendPhotos(c, t, photos) {
-  const asDoc = c.user.photoAs === "document";
+  const asDoc = c.cf.photoAs === "document";
   const type = asDoc ? "document" : "photo";
-  const cap = capLine(c, t);
   for (let i = 0; i < photos.length; i += 10) {
     const chunk = photos.slice(i, i + 10);
+    // Mỗi ảnh mang link gốc của chính nó (giấu trong caption); chỉ ảnh đầu tiên hiện tên tác giả
+    const capOf = (p, k) => capFor(c, t, p.url, i === 0 && k === 0);
     let res;
     if (chunk.length === 1) {
       res = await tg(c.env, asDoc ? "sendDocument" : "sendPhoto", {
         ...base(c),
         [type]: chunk[0].url,
-        caption: i === 0 ? cap : undefined,
+        caption: capOf(chunk[0], 0),
         parse_mode: "HTML",
       });
     } else {
       res = await tg(c.env, "sendMediaGroup", {
         ...base(c),
-        media: chunk.map((p, k) => ({
-          type,
-          media: p.url,
-          caption: i === 0 && k === 0 ? cap : undefined,
-          parse_mode: "HTML",
-        })),
+        media: chunk.map((p, k) => ({ type, media: p.url, caption: capOf(p, k), parse_mode: "HTML" })),
       });
     }
-    await bump(c.env, c.cf, "downloads");
     if (!res.ok) {
-      await send(c, c.L.sendFail);
+      await send(c, L.sendFail);
       await sendLinks(c, chunk.map((p) => p.url));
     }
   }
 }
 
-async function sendVideo(c, t, v) {
-  const urls = videoUrls(v, c.user.quality).slice(0, 3);
-  if (!urls.length) return send(c, c.L.sendFail);
+async function sendVideo(c, t, v, showCap) {
+  const urls = videoUrls(v, c.cf.quality).slice(0, 3);
+  if (!urls.length) return send(c, L.sendFail);
   const gif = v.type === "gif";
   const method = gif ? "sendAnimation" : "sendVideo";
   const field = gif ? "animation" : "video";
   const fields = {
     ...base(c),
-    caption: capLine(c, t),
+    // Link giấu luôn là bản chất lượng cao nhất theo cài đặt, kể cả khi phải gửi bản thấp hơn
+    caption: capFor(c, t, urls[0], showCap),
     parse_mode: "HTML",
     ...(gif ? {} : { supports_streaming: true }),
   };
@@ -656,125 +513,7 @@ async function sendVideo(c, t, v) {
     if (!res.ok) res = await tgUpload(c.env, method, field, urls[i], f, "video.mp4", "video/mp4");
     if (res.ok) break;
   }
-  await bump(c.env, c.cf, "downloads");
-  if (!res.ok) await send(c, `${c.L.sendFail}\n${urls[0]}`);
-}
-
-async function sendMusic(c, t, music) {
-  if (!music || !music.url) return;
-  const fields = {
-    ...base(c),
-    caption: capLine(c, t),
-    parse_mode: "HTML",
-    title: music.title,
-    performer: music.performer,
-  };
-  let res = await tg(c.env, "sendAudio", { ...fields, audio: music.url });
-  if (!res.ok) res = await tgUpload(c.env, "sendAudio", "audio", music.url, fields, "music.mp3", "audio/mpeg");
-  await bump(c.env, c.cf, "downloads");
-  if (!res.ok) await send(c, `${c.L.sendFail}\n${music.url}`);
-}
-
-/* ───────────────────────── Callback (nút bấm) ───────────────────────── */
-async function onCallback(env, cq) {
-  const cf = cfg(env);
-  const msg = cq.message;
-  if (!msg) return tg(env, "answerCallbackQuery", { callback_query_id: cq.id });
-
-  const user = await getUser(env, cq.from.id, cf);
-  const L = T[user.lang] || T.vi;
-  const c = {
-    env, cf, L, user,
-    chatId: msg.chat.id,
-    thread: msg.is_topic_message ? msg.message_thread_id : undefined,
-    userId: cq.from.id,
-    msg,
-  };
-
-  if (!isAllowed(cf, cq.from.id)) {
-    return tg(env, "answerCallbackQuery", { callback_query_id: cq.id, text: L.denied, show_alert: true });
-  }
-
-  const data = cq.data || "";
-  if (data === "noop") return tg(env, "answerCallbackQuery", { callback_query_id: cq.id });
-  if (data.startsWith("st:")) return onSetting(c, cq, data);
-
-  const [act, pid, arg] = data.split(":");
-  await tg(env, "answerCallbackQuery", { callback_query_id: cq.id, text: L.working });
-
-  const p = pid ? await loadPost(pid) : null;
-  if (!p) return send(c, L.notFound);
-  const { t, m } = p;
-  const idx = parseInt(arg, 10);
-
-  switch (act) {
-    case "i":  return sendLinks(c, linesFor(c, m, { photos: idx }));
-    case "ia": return sendLinks(c, linesFor(c, m, { photos: "all" }));
-    case "pf": return sendPhotos(c, t, m.photos);
-    case "vs": return m.videos[idx] ? sendVideo(c, t, m.videos[idx]) : undefined;
-    case "mu": return sendMusic(c, t, m.music);
-  }
-}
-
-/* ───────────────────────── Cài đặt ───────────────────────── */
-function settingsKeyboard(c) {
-  const u = c.user, L = c.L;
-  const mark = (on, label) => (on ? `✅ ${label}` : label);
-  const title = (t) => [{ text: t, callback_data: "noop" }];
-  const opt = (key, val, label) => ({ text: mark(u[key] === val, label), callback_data: `st:${key}:${val}` });
-  return [
-    title(L.sLang),
-    [opt("lang", "vi", "🇻🇳 Tiếng Việt"), opt("lang", "en", "🇬🇧 English")],
-    title(L.sQuality),
-    ["best", "medium", "low"].map((v) => opt("quality", v, L.q[v])),
-    title(L.sPhotoAs),
-    ["photo", "document"].map((v) => opt("photoAs", v, L.pa[v])),
-    title(L.sAuto),
-    ["off", "links", "files"].map((v) => opt("auto", v, L.au[v])),
-    title(L.sCaption),
-    [opt("caption", true, L.on), opt("caption", false, L.off)],
-  ];
-}
-
-async function showSettings(c) {
-  const note = c.env.KV ? "" : `\n\n${c.L.noKV}`;
-  return send(c, c.L.settingsTitle + note, { reply_markup: { inline_keyboard: settingsKeyboard(c) } });
-}
-
-const VALID = {
-  lang: ["vi", "en"],
-  quality: ["best", "medium", "low"],
-  photoAs: ["photo", "document"],
-  auto: ["off", "links", "files"],
-  caption: ["true", "false"],
-};
-
-async function onSetting(c, cq, data) {
-  const [, key, raw] = data.split(":");
-  if (!VALID[key] || !VALID[key].includes(raw)) return tg(c.env, "answerCallbackQuery", { callback_query_id: cq.id });
-  if (!c.env.KV) {
-    return tg(c.env, "answerCallbackQuery", { callback_query_id: cq.id, text: c.L.noKV, show_alert: true });
-  }
-  c.user[key] = key === "caption" ? raw === "true" : raw;
-  await saveUser(c.env, c.userId, c.user);
-  c.L = T[c.user.lang] || T.vi;
-  await tg(c.env, "answerCallbackQuery", { callback_query_id: cq.id, text: c.L.saved });
-  return tg(c.env, "editMessageText", {
-    chat_id: c.chatId,
-    message_id: c.msg.message_id,
-    text: c.L.settingsTitle,
-    parse_mode: "HTML",
-    reply_markup: { inline_keyboard: settingsKeyboard(c) },
-  });
-}
-
-/* ───────────────────────── Admin ───────────────────────── */
-async function showStats(c) {
-  if (!c.cf.admins.includes(String(c.userId))) return;
-  if (!c.cf.enableStats || !c.env.KV) return send(c, "ℹ️ Stats: set ENABLE_STATS=\"true\" và gắn KV.");
-  const r = (await c.env.KV.get("stat:requests")) || "0";
-  const d = (await c.env.KV.get("stat:downloads")) || "0";
-  return send(c, `📊 <b>Stats</b>\nLink đã xử lý: <b>${r}</b>\nLần tải: <b>${d}</b>`);
+  if (!res.ok) await send(c, `${L.sendFail}\n${urls[0]}`);
 }
 
 /* ───────────────────────── Setup webhook ───────────────────────── */
@@ -788,15 +527,14 @@ async function setup(url, env) {
   const hook = await tg(env, "setWebhook", {
     url: `${url.origin}/`,
     secret_token: env.WEBHOOK_SECRET,
-    allowed_updates: ["message", "callback_query"],
+    allowed_updates: ["message"],
     drop_pending_updates: true,
   });
-  const cmds = (lang) => [
-    { command: "start", description: T[lang].start.replace(/<[^>]+>/g, "").split("\n")[0].slice(0, 60) },
-    { command: "help", description: lang === "vi" ? "Hướng dẫn sử dụng" : "How to use" },
-    { command: "settings", description: lang === "vi" ? "Cài đặt" : "Settings" },
-  ];
-  await tg(env, "setMyCommands", { commands: cmds("vi") });
-  await tg(env, "setMyCommands", { commands: cmds("en"), language_code: "en" });
+  await tg(env, "setMyCommands", {
+    commands: [
+      { command: "start", description: "Bắt đầu" },
+      { command: "help", description: "Hướng dẫn sử dụng" },
+    ],
+  });
   return new Response(JSON.stringify({ webhook: hook }, null, 2), { headers: { "content-type": "application/json" } });
 }
