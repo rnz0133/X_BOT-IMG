@@ -5,13 +5,6 @@ name = "x-downloader-bot"
 main = "worker.js"
 compatibility_date = "2025-06-01"
 
-# ── KV (TÙY CHỌN) ──────────────────────────────────────────
-# Cần nếu muốn LƯU cài đặt từng người dùng (/settings) và thống kê.
-# Tạo:  npx wrangler kv namespace create KV   → dán id vào đây, bỏ dấu #
-[[kv_namespaces]]
-binding = "KV"
-id = "2f2d50d984344c8abe727f4ca25a05a0"
-
 # ── Biến cấu hình ──────────────────────────────────────────
 [vars]
 # Ngôn ngữ mặc định: "vi" | "en"
@@ -45,7 +38,7 @@ ALLOWED_USERS = ""
 # Admin ID (dùng được lệnh /stats)
 ADMIN_IDS = ""
 
-# Bật đếm thống kê (cần KV; mỗi lượt ghi 1 lần KV): "true" | "false"
+# Bật đếm thống kê (cần gắn KV; hiện đã tắt KV nên để "false"): "true" | "false"
 ENABLE_STATS = "false"
 
 # ── SECRETS (KHÔNG ghi vào file này) ───────────────────────
